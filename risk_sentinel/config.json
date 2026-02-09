@@ -1,0 +1,6 @@
+{
+	"tickers": ["AMD", "UBS", "USO"],
+	"hard_stop_loss_percent": 0.15,
+	"ma200_threshold": 0.95,
+	"poll_interval_seconds": 5
+}
