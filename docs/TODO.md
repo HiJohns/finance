@@ -26,12 +26,12 @@ Based on the README.md, here's a todo list for the finance system:
 
 ### Module 3: Macro and Financial Audit (The Auditor)
 
-- [ ] Implement Mag 7 Input-Output Ratio Monitoring (AI-ROI Tracker):
-  - [ ] Parse financial statements (10-Q/10-K)
-  - [ ] Calculate Capex Intensity (Capital Expenditure / Total Revenue)
-  - [ ] Calculate FCF Yield (Free Cash Flow Yield)
-  - [ ] Monitor the burning money efficiency of Mag 7
-  - [ ] Trigger pre-warning reduction in tech stocks if Capex growth > Revenue growth
+- [x] Implement Mag 7 Input-Output Ratio Monitoring (AI-ROI Tracker):
+  - [x] Parse financial statements (10-Q/10-K)
+  - [x] Calculate Capex Intensity (Capital Expenditure / Total Revenue)
+  - [x] Calculate FCF Yield (Free Cash Flow Yield)
+  - [x] Monitor the burning money efficiency of Mag 7
+  - [x] Trigger pre-warning reduction in tech stocks if Capex growth > Revenue growth
 
 ### Module 4: Execution Module (The Exec)
 
