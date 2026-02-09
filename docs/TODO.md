@@ -35,6 +35,6 @@ Based on the README.md, here's a todo list for the finance system:
 
 ### Module 4: Execution Module (The Exec)
 
-- [ ] Implement Integer Programming Execution (Discrete Optimizer):
-  - [ ] Use `cvxpy` to solve the Integer Knapsack problem
-  - [ ] Calculate the actual number of shares to buy that are closest to the target proportion, under A-share (100 shares per lot) and high-priced U.S. stock restrictions
+- [x] Implement Integer Programming Execution (Discrete Optimizer):
+  - [x] Use `cvxpy` to solve the Integer Knapsack problem
+  - [x] Calculate the actual number of shares to buy that are closest to the target proportion, under A-share (100 shares per lot) and high-priced U.S. stock restrictions
