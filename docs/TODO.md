@@ -8,10 +8,10 @@ Based on the README.md, here's a todo list for the finance system:
   - [x] Calculate annualized volatility
   - [x] Calculate Maximum Drawdown (MDD)
   - [x] Calculate Beta value relative to S&P 500
-- [ ] Implement MWU Dynamic Adjustment Weight Engine:
-  - [ ] Implement the Multiplication Weights Update (MWU) algorithm
-  - [ ] Automatically reduce weights on assets with systemic drops (Loss increase)
-  - [ ] Shift weights to cash or low volatility assets (e.g., UBS/German ETF)
+- [x] Implement MWU Dynamic Adjustment Weight Engine:
+  - [x] Implement the Multiplication Weights Update (MWU) algorithm
+  - [x] Automatically reduce weights on assets with systemic drops (Loss increase)
+  - [x] Shift weights to cash or low volatility assets (e.g., UBS/German ETF)
 
 ### Module 2: Go Risk Sentinel (The Sentinel)
 
