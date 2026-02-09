@@ -172,6 +172,11 @@ func (pm *PriceMonitor) monitorStock(ctx context.Context, config StockConfig) {
 			pm.alertChan <- alert
 		}
 
+		// 如果昨收为0，则使用当前价格作为昨收
+		if data.PreviousClose == 0 {
+			data.PreviousClose = data.CurrentPrice
+		}
+
 		// 打印监控状态
 		log.Printf("[%s] 当前: $%.2f | 昨收: $%.2f | 涨跌: %.2f%%",
 			ticker, data.CurrentPrice, data.PreviousClose, data.ChangePercent)
