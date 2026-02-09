@@ -15,14 +15,14 @@ Based on the README.md, here's a todo list for the finance system:
 
 ### Module 2: Go Risk Sentinel (The Sentinel)
 
-- [ ] Implement Real-time Stop Loss and Water Level Monitoring:
-  - [ ] Poll market data API
-  - [ ] Implement hard stop-loss logic (e.g., 15% drawdown)
-  - [ ] Implement technical level monitoring (e.g., price below 200-day moving average)
+- [x] Implement Real-time Stop Loss and Water Level Monitoring:
+  - [x] Poll market data API
+  - [x] Implement hard stop-loss logic (e.g., 15% drawdown)
+  - [x] Implement technical level monitoring (e.g., price below 200-day moving average)
   - [ ] Output instant desktop notifications or emails
-- [ ] Implement Whale Anomaly Detection:
-  - [ ] Monitor SLV (Silver) and GLD (Gold) for Volume-Price Divergence (VPD)
-  - [ ] Identify if major players are retreating based on volume spikes and price stagnation
+- [x] Implement Whale Anomaly Detection:
+  - [x] Monitor SLV (Silver) and GLD (Gold) for Volume-Price Divergence (VPD)
+  - [x] Identify if major players are retreating based on volume spikes and price stagnation
 
 ### Module 3: Macro and Financial Audit (The Auditor)
 
