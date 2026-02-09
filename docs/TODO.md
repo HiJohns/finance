@@ -4,10 +4,10 @@ Based on the README.md, here's a todo list for the finance system:
 
 ### Module 1: Python Strategy Lab (The Lab)
 
-- [ ] Implement Risk Profiler:
-  - [ ] Calculate annualized volatility
-  - [ ] Calculate Maximum Drawdown (MDD)
-  - [ ] Calculate Beta value relative to S&P 500
+- [x] Implement Risk Profiler:
+  - [x] Calculate annualized volatility
+  - [x] Calculate Maximum Drawdown (MDD)
+  - [x] Calculate Beta value relative to S&P 500
 - [ ] Implement MWU Dynamic Adjustment Weight Engine:
   - [ ] Implement the Multiplication Weights Update (MWU) algorithm
   - [ ] Automatically reduce weights on assets with systemic drops (Loss increase)
