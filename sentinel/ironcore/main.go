@@ -77,15 +77,16 @@ func main() {
 	assets := []string{"AMD", "SLV", "USO", "GLD", "IWY"}
 	dxy := "DX-Y.NYB"
 
-	dxyReturns, dxySource := getReturnsWithRetry(dxy, endTime)
+	dxyReturns, dxyDates, dxySource := getReturnsWithRetry(dxy, endTime)
 	if dxyReturns == nil {
 		log.Printf("[DXY] 尝试备选: UUP")
-		dxyReturns, dxySource = getReturnsWithRetry("UUP", endTime)
+		dxyReturns, dxyDates, dxySource = getReturnsWithRetry("UUP", endTime)
 		if dxyReturns == nil {
 			log.Printf("[DXY] 尝试备选: EURUSD=X")
-			eurReturns, _ := getReturnsWithRetry("EURUSD=X", endTime)
+			eurReturns, eurDates, _ := getReturnsWithRetry("EURUSD=X", endTime)
 			if eurReturns != nil {
 				dxyReturns = make([]float64, len(eurReturns))
+				dxyDates = eurDates
 				for i, r := range eurReturns {
 					if r != 0 {
 						dxyReturns[i] = -r
@@ -95,6 +96,13 @@ func main() {
 			} else {
 				dxySource = ""
 			}
+		}
+	}
+
+	dxyMap := make(map[string]float64)
+	if dxyReturns != nil && dxyDates != nil {
+		for i, date := range dxyDates {
+			dxyMap[date] = dxyReturns[i]
 		}
 	}
 
@@ -114,21 +122,38 @@ func main() {
 	}
 
 	for _, symbol := range assets {
-		assetReturns, _ := getReturnsWithRetry(symbol, endTime)
+		assetReturns, assetDates, _ := getReturnsWithRetry(symbol, endTime)
 
-		if len(assetReturns) == 0 || len(dxyReturns) == 0 {
+		if len(assetReturns) == 0 || len(dxyMap) == 0 {
 			log.Printf("警告: %s 数据为空，跳过", symbol)
 			plotData.Corrs[symbol] = []float64{0}
 			report += fmt.Sprintf("%-5s vs DXY: N/A (数据不足)\n", symbol)
 			continue
 		}
 
-		n := len(dxyReturns)
-		if len(assetReturns) < n {
-			n = len(assetReturns)
+		var validAsset, validDXY []float64
+		for i, date := range assetDates {
+			if _, ok := dxyMap[date]; ok {
+				validAsset = append(validAsset, assetReturns[i])
+				validDXY = append(validDXY, dxyMap[date])
+			}
 		}
 
-		correlation := stat.Correlation(assetReturns[:n], dxyReturns[:n], nil)
+		if len(validAsset) < 20 {
+			log.Printf("警告: %s 对齐后样本量不足 (%d < 20)，跳过", symbol, len(validAsset))
+			plotData.Corrs[symbol] = []float64{0}
+			report += fmt.Sprintf("%-5s vs DXY: N/A (样本不足)\n", symbol)
+			continue
+		}
+
+		if hasZeroVariance(validAsset) || hasZeroVariance(validDXY) {
+			log.Printf("警告: %s 数据方差为0，无法计算相关性", symbol)
+			plotData.Corrs[symbol] = []float64{0}
+			report += fmt.Sprintf("%-5s vs DXY: N/A (方差为0)\n", symbol)
+			continue
+		}
+
+		correlation := stat.Correlation(validAsset, validDXY, nil)
 		plotData.Corrs[symbol] = []float64{correlation}
 
 		status := "🟢 独立"
@@ -144,11 +169,11 @@ func main() {
 	sendEmail(fmt.Sprintf("Beacon 审计: 宏观资产风险分析 [审计基准日: %s]", reportDate), report)
 }
 
-func getReturnsWithRetry(symbol string, endTime time.Time) ([]float64, string) {
+func getReturnsWithRetry(symbol string, endTime time.Time) ([]float64, []string, string) {
 	delays := []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second}
 
 	for i, delay := range delays {
-		returns, err := getReturnsWithError(symbol, endTime)
+		returns, dates, err := getReturnsWithError(symbol, endTime)
 		if err != nil {
 			if strings.Contains(err.Error(), "remote-error") || strings.Contains(err.Error(), "429") {
 				log.Printf("[%s] 第 %d 次重试遇到错误: %v, 等待 %.0fs", symbol, i+1, err, delay.Seconds())
@@ -157,7 +182,7 @@ func getReturnsWithRetry(symbol string, endTime time.Time) ([]float64, string) {
 			}
 		}
 		if returns != nil {
-			return returns, symbol
+			return returns, dates, symbol
 		}
 		if i < len(delays)-1 {
 			log.Printf("[%s] 数据为空，第 %d 次重试...", symbol, i+1)
@@ -166,10 +191,10 @@ func getReturnsWithRetry(symbol string, endTime time.Time) ([]float64, string) {
 	}
 
 	log.Printf("[%s] 所有重试均失败", symbol)
-	return nil, ""
+	return nil, nil, ""
 }
 
-func getReturnsWithError(symbol string, endTime time.Time) ([]float64, error) {
+func getReturnsWithError(symbol string, endTime time.Time) ([]float64, []string, error) {
 	endTimeWithDay := endTime.Add(24 * time.Hour)
 	startTime := endTime.AddDate(0, -6, 0)
 	startDt := datetime.New(&startTime)
@@ -185,6 +210,7 @@ func getReturnsWithError(symbol string, endTime time.Time) ([]float64, error) {
 	}
 	iter := chart.Get(p)
 	var prices []float64
+	var timestamps []int64
 	var firstTime int64
 	for iter.Next() {
 		bar := iter.Bar()
@@ -195,34 +221,40 @@ func getReturnsWithError(symbol string, endTime time.Time) ([]float64, error) {
 		}
 		f, _ := bar.Close.Float64()
 		prices = append(prices, f)
+		timestamps = append(timestamps, int64(bar.Timestamp))
 	}
 	if err := iter.Err(); err != nil {
 		log.Printf("[%s] 迭代器错误: %v", symbol, err)
-		return nil, fmt.Errorf("remote-error: %v", err)
+		return nil, nil, fmt.Errorf("remote-error: %v", err)
 	}
 	if len(prices) < 2 {
 		log.Printf("[%s] 数据不足 (%d 条)，尝试 OneMin...", symbol, len(prices))
 		p.Interval = datetime.OneMin
 		iter = chart.Get(p)
 		prices = nil
+		timestamps = nil
 		for iter.Next() {
 			bar := iter.Bar()
 			f, _ := bar.Close.Float64()
 			prices = append(prices, f)
+			timestamps = append(timestamps, int64(bar.Timestamp))
 		}
 		if err := iter.Err(); err != nil {
 			log.Printf("[%s] OneMin 迭代器错误: %v", symbol, err)
 		}
 		log.Printf("[%s] OneMin 数据条数: %d", symbol, len(prices))
 		if len(prices) < 2 {
-			return nil, nil
+			return nil, nil, nil
 		}
 	}
+	dates := make([]string, len(prices)-1)
 	returns := make([]float64, len(prices)-1)
 	for i := 1; i < len(prices); i++ {
+		tm := time.Unix(timestamps[i], 0)
+		dates[i-1] = tm.Format("2006-01-02")
 		returns[i-1] = (prices[i] - prices[i-1]) / prices[i-1]
 	}
-	return returns, nil
+	return returns, dates, nil
 }
 
 func generateChart(data PlotData) {
@@ -234,6 +266,19 @@ func generateChart(data PlotData) {
 		stdin.Write(jsonData)
 	}()
 	cmd.Run()
+}
+
+func hasZeroVariance(data []float64) bool {
+	if len(data) < 2 {
+		return true
+	}
+	first := data[0]
+	for _, v := range data[1:] {
+		if v != first {
+			return false
+		}
+	}
+	return true
 }
 
 func sendEmail(subject, body string) {
