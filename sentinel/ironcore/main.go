@@ -290,14 +290,24 @@ func getReturnsWithError(symbol string, endTime time.Time) ([]float64, []string,
 }
 
 func generateChart(data PlotData) {
-	jsonData, _ := json.Marshal(data)
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		log.Printf("JSON 序列化失败: %v", err)
+		return
+	}
 	cmd := exec.Command("python3", "plotter.py")
-	stdin, _ := cmd.StdinPipe()
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		log.Printf("创建 stdin pipe 失败: %v", err)
+		return
+	}
 	go func() {
 		defer stdin.Close()
 		stdin.Write(jsonData)
 	}()
-	cmd.Run()
+	if err := cmd.Run(); err != nil {
+		log.Printf("执行 plotter.py 失败: %v", err)
+	}
 }
 
 func hasZeroVariance(data []float64) bool {
