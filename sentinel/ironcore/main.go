@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"net/smtp"
 	"os/exec"
@@ -134,10 +135,16 @@ func main() {
 		var validAsset, validDXY []float64
 		for i, date := range assetDates {
 			if _, ok := dxyMap[date]; ok {
-				validAsset = append(validAsset, assetReturns[i])
-				validDXY = append(validDXY, dxyMap[date])
+				ar := assetReturns[i]
+				dr := dxyMap[date]
+				if !math.IsNaN(ar) && !math.IsNaN(dr) && !math.IsInf(ar, 0) && !math.IsInf(dr, 0) {
+					validAsset = append(validAsset, ar)
+					validDXY = append(validDXY, dr)
+				}
 			}
 		}
+
+		log.Printf("[%s] 对齐后有效样本: %d", symbol, len(validAsset))
 
 		if len(validAsset) < 20 {
 			log.Printf("警告: %s 对齐后样本量不足 (%d < 20)，跳过", symbol, len(validAsset))
@@ -154,6 +161,13 @@ func main() {
 		}
 
 		correlation := stat.Correlation(validAsset, validDXY, nil)
+		if math.IsNaN(correlation) {
+			log.Printf("[%s] 相关性计算结果为 NaN", symbol)
+			plotData.Corrs[symbol] = []float64{0}
+			report += fmt.Sprintf("%-5s vs DXY: N/A (计算NaN)\n", symbol)
+			continue
+		}
+		log.Printf("[%s] 相关性: %.4f", symbol, correlation)
 		plotData.Corrs[symbol] = []float64{correlation}
 
 		status := "🟢 独立"
