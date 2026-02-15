@@ -3,6 +3,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/smtp"
@@ -29,29 +30,49 @@ type PlotData struct {
 }
 
 func main() {
+	dateFlag := flag.String("date", "", "审计结束日期 (格式: YYYY-MM-DD)")
+	flag.Parse()
+
+	var endTime time.Time
+	if *dateFlag != "" {
+		var err error
+		endTime, err = time.Parse("2006-01-02", *dateFlag)
+		if err != nil {
+			log.Printf("日期解析失败，使用当前时间: %v", err)
+			endTime = time.Now()
+		}
+	} else {
+		endTime = time.Now()
+	}
+
 	assets := []string{"AMD", "SLV", "USO", "GLD", "IWY"}
 	dxy := "DX-Y.NYB"
 
-	// 获取数据
-	dxyReturns := getReturns(dxy)
+	dxyReturns := getReturns(dxy, endTime)
 	plotData := PlotData{
 		Assets: assets,
 		Corrs:  make(map[string][]float64),
 	}
 
-	report := fmt.Sprintf("--- Beacon 资产审计报告 [%s] ---\n\n", time.Now().Format("2006-01-02"))
+	reportDate := endTime.Format("2006-01-02")
+	report := fmt.Sprintf("--- Beacon 资产审计报告 [%s] ---\n\n", reportDate)
 	report += "【美元引力场审计】\n"
 
 	for _, symbol := range assets {
-		assetReturns := getReturns(symbol)
+		assetReturns := getReturns(symbol, endTime)
 
-		// 对齐数据长度
+		if len(assetReturns) == 0 || len(dxyReturns) == 0 {
+			log.Printf("警告: %s 数据为空，跳过", symbol)
+			plotData.Corrs[symbol] = []float64{0}
+			report += fmt.Sprintf("%-5s vs DXY: N/A (数据不足)\n", symbol)
+			continue
+		}
+
 		n := len(dxyReturns)
 		if len(assetReturns) < n {
 			n = len(assetReturns)
 		}
 
-		// 计算相关性
 		correlation := stat.Correlation(assetReturns[:n], dxyReturns[:n], nil)
 		plotData.Corrs[symbol] = []float64{correlation}
 
@@ -64,15 +85,13 @@ func main() {
 		report += fmt.Sprintf("%-5s vs DXY: %.4f (%s)\n", symbol, correlation, status)
 	}
 
-	// 生成图表并发送邮件
 	generateChart(plotData)
-	sendEmail("Beacon 审计: 宏观资产风险分析", report)
+	sendEmail(fmt.Sprintf("Beacon 审计: 宏观资产风险分析 [审计基准日: %s]", reportDate), report)
 }
 
-func getReturns(symbol string) []float64 {
-	currentTime := now()
-	endDt := datetime.New(&currentTime)
-	startTime := currentTime.AddDate(0, -6, 0)
+func getReturns(symbol string, endTime time.Time) []float64 {
+	endDt := datetime.New(&endTime)
+	startTime := endTime.AddDate(0, -6, 0)
 	startDt := datetime.New(&startTime)
 	p := &chart.Params{
 		Symbol:   symbol,
