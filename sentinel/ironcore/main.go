@@ -6,14 +6,43 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"net/smtp"
 	"os/exec"
+	"strings"
 	"time"
 
+	"github.com/piquette/finance-go"
 	"github.com/piquette/finance-go/chart"
 	"github.com/piquette/finance-go/datetime"
 	"gonum.org/v1/gonum/stat"
 )
+
+func init() {
+	customClient := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+	customClient.Transport = &http.Transport{
+		MaxIdleConns:        10,
+		MaxIdleConnsPerHost: 5,
+	}
+
+	original := http.DefaultTransport
+	customClient.Transport = &customTransport{original}
+
+	finance.SetHTTPClient(customClient)
+}
+
+type customTransport struct {
+	http.RoundTripper
+}
+
+func (ct *customTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Connection", "keep-alive")
+	return ct.RoundTripper.RoundTrip(req)
+}
 
 var now = time.Now
 
@@ -48,7 +77,27 @@ func main() {
 	assets := []string{"AMD", "SLV", "USO", "GLD", "IWY"}
 	dxy := "DX-Y.NYB"
 
-	dxyReturns := getReturns(dxy, endTime)
+	dxyReturns, dxySource := getReturnsWithRetry(dxy, endTime)
+	if dxyReturns == nil {
+		log.Printf("[DXY] 尝试备选: UUP")
+		dxyReturns, dxySource = getReturnsWithRetry("UUP", endTime)
+		if dxyReturns == nil {
+			log.Printf("[DXY] 尝试备选: EURUSD=X")
+			eurReturns, _ := getReturnsWithRetry("EURUSD=X", endTime)
+			if eurReturns != nil {
+				dxyReturns = make([]float64, len(eurReturns))
+				for i, r := range eurReturns {
+					if r != 0 {
+						dxyReturns[i] = -r
+					}
+				}
+				dxySource = "EURUSD=X (反转)"
+			} else {
+				dxySource = ""
+			}
+		}
+	}
+
 	plotData := PlotData{
 		Assets: assets,
 		Corrs:  make(map[string][]float64),
@@ -58,8 +107,14 @@ func main() {
 	report := fmt.Sprintf("--- Beacon 资产审计报告 [%s] ---\n\n", reportDate)
 	report += "【美元引力场审计】\n"
 
+	if dxySource == "" {
+		report += "[CRITICAL] 数据源连接被封锁，请检查服务器 IP 或更换代理。\n"
+	} else {
+		report += fmt.Sprintf("美元指数基准: %s\n\n", dxySource)
+	}
+
 	for _, symbol := range assets {
-		assetReturns := getReturns(symbol, endTime)
+		assetReturns, _ := getReturnsWithRetry(symbol, endTime)
 
 		if len(assetReturns) == 0 || len(dxyReturns) == 0 {
 			log.Printf("警告: %s 数据为空，跳过", symbol)
@@ -89,7 +144,32 @@ func main() {
 	sendEmail(fmt.Sprintf("Beacon 审计: 宏观资产风险分析 [审计基准日: %s]", reportDate), report)
 }
 
-func getReturns(symbol string, endTime time.Time) []float64 {
+func getReturnsWithRetry(symbol string, endTime time.Time) ([]float64, string) {
+	delays := []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second}
+
+	for i, delay := range delays {
+		returns, err := getReturnsWithError(symbol, endTime)
+		if err != nil {
+			if strings.Contains(err.Error(), "remote-error") || strings.Contains(err.Error(), "429") {
+				log.Printf("[%s] 第 %d 次重试遇到错误: %v, 等待 %.0fs", symbol, i+1, err, delay.Seconds())
+				time.Sleep(delay)
+				continue
+			}
+		}
+		if returns != nil {
+			return returns, symbol
+		}
+		if i < len(delays)-1 {
+			log.Printf("[%s] 数据为空，第 %d 次重试...", symbol, i+1)
+			time.Sleep(delay)
+		}
+	}
+
+	log.Printf("[%s] 所有重试均失败", symbol)
+	return nil, ""
+}
+
+func getReturnsWithError(symbol string, endTime time.Time) ([]float64, error) {
 	endTimeWithDay := endTime.Add(24 * time.Hour)
 	startTime := endTime.AddDate(0, -6, 0)
 	startDt := datetime.New(&startTime)
@@ -118,6 +198,7 @@ func getReturns(symbol string, endTime time.Time) []float64 {
 	}
 	if err := iter.Err(); err != nil {
 		log.Printf("[%s] 迭代器错误: %v", symbol, err)
+		return nil, fmt.Errorf("remote-error: %v", err)
 	}
 	if len(prices) < 2 {
 		log.Printf("[%s] 数据不足 (%d 条)，尝试 OneMin...", symbol, len(prices))
@@ -134,14 +215,14 @@ func getReturns(symbol string, endTime time.Time) []float64 {
 		}
 		log.Printf("[%s] OneMin 数据条数: %d", symbol, len(prices))
 		if len(prices) < 2 {
-			return nil
+			return nil, nil
 		}
 	}
 	returns := make([]float64, len(prices)-1)
 	for i := 1; i < len(prices); i++ {
 		returns[i-1] = (prices[i] - prices[i-1]) / prices[i-1]
 	}
-	return returns
+	return returns, nil
 }
 
 func generateChart(data PlotData) {
