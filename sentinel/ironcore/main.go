@@ -90,9 +90,13 @@ func main() {
 }
 
 func getReturns(symbol string, endTime time.Time) []float64 {
-	endDt := datetime.New(&endTime)
+	endTimeWithDay := endTime.Add(24 * time.Hour)
 	startTime := endTime.AddDate(0, -6, 0)
 	startDt := datetime.New(&startTime)
+	endDt := datetime.New(&endTimeWithDay)
+
+	log.Printf("[%s] 请求时间窗口: Start=%d, End=%d", symbol, startTime.Unix(), endTimeWithDay.Unix())
+
 	p := &chart.Params{
 		Symbol:   symbol,
 		Start:    startDt,
@@ -101,12 +105,37 @@ func getReturns(symbol string, endTime time.Time) []float64 {
 	}
 	iter := chart.Get(p)
 	var prices []float64
+	var firstTime int64
 	for iter.Next() {
-		f, _ := iter.Bar().Close.Float64()
+		bar := iter.Bar()
+		if firstTime == 0 {
+			firstTime = int64(bar.Timestamp)
+			close, _ := bar.Close.Float64()
+			log.Printf("[%s] 首条数据: Time=%d, Close=%.4f", symbol, firstTime, close)
+		}
+		f, _ := bar.Close.Float64()
 		prices = append(prices, f)
 	}
+	if err := iter.Err(); err != nil {
+		log.Printf("[%s] 迭代器错误: %v", symbol, err)
+	}
 	if len(prices) < 2 {
-		return nil
+		log.Printf("[%s] 数据不足 (%d 条)，尝试 OneMin...", symbol, len(prices))
+		p.Interval = datetime.OneMin
+		iter = chart.Get(p)
+		prices = nil
+		for iter.Next() {
+			bar := iter.Bar()
+			f, _ := bar.Close.Float64()
+			prices = append(prices, f)
+		}
+		if err := iter.Err(); err != nil {
+			log.Printf("[%s] OneMin 迭代器错误: %v", symbol, err)
+		}
+		log.Printf("[%s] OneMin 数据条数: %d", symbol, len(prices))
+		if len(prices) < 2 {
+			return nil
+		}
 	}
 	returns := make([]float64, len(prices)-1)
 	for i := 1; i < len(prices); i++ {
