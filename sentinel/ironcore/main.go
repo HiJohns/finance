@@ -2,6 +2,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"net/smtp"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -328,17 +330,49 @@ func sendEmail(subject, body string) {
 		log.Println("❌ 错误：SMTP 凭证未注入。请检查编译脚本。")
 		return
 	}
+
 	auth := smtp.PlainAuth("", smtpUser, smtpPass, "smtp.qq.com")
 	from := "IronCore <" + smtpUser + ">"
+
+	imgData, err := os.ReadFile("audit_chart.png")
+	if err != nil {
+		log.Printf("警告: audit_chart.png 不存在，发送纯文本邮件: %v", err)
+		msg := []byte("From: " + from + "\r\n" +
+			"To: " + receiver + "\r\n" +
+			"Subject: " + subject + "\r\n" +
+			"Content-Type: text/plain; charset=\"utf-8\"\r\n" +
+			"\r\n" +
+			body)
+		err = smtp.SendMail("smtp.qq.com:587", auth, smtpUser, []string{receiver}, msg)
+		if err != nil {
+			log.Printf("邮件发送失败: %v", err)
+		}
+		return
+	}
+
+	encoded := base64.StdEncoding.EncodeToString(imgData)
+	boundary := "----IronCoreBoundary" + fmt.Sprintf("%d", time.Now().Unix())
+
 	msg := []byte("From: " + from + "\r\n" +
 		"To: " + receiver + "\r\n" +
 		"Subject: " + subject + "\r\n" +
-		"Content-Type: text/plain; charset=\"utf-8\"\r\n" +
+		"Content-Type: multipart/mixed; boundary=" + boundary + "\r\n" +
 		"\r\n" +
-		body)
-	err := smtp.SendMail("smtp.qq.com:587", auth, smtpUser, []string{receiver}, msg)
+		"--" + boundary + "\r\n" +
+		"Content-Type: text/html; charset=\"utf-8\"\r\n" +
+		"\r\n" +
+		"<html><body>" + body + "<br><br><img src=\"cid:chart\"></body></html>\r\n" +
+		"--" + boundary + "\r\n" +
+		"Content-Type: image/png; name=\"audit_chart.png\"\r\n" +
+		"Content-Transfer-Encoding: base64\r\n" +
+		"Content-ID: <chart>\r\n" +
+		"Content-Disposition: inline; filename=\"audit_chart.png\"\r\n" +
+		"\r\n" +
+		encoded + "\r\n" +
+		"--" + boundary + "--\r\n")
+
+	err = smtp.SendMail("smtp.qq.com:587", auth, smtpUser, []string{receiver}, msg)
 	if err != nil {
 		log.Printf("邮件发送失败: %v", err)
 	}
-
 }
