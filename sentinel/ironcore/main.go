@@ -57,8 +57,9 @@ var (
 )
 
 type PlotData struct {
-	Assets []string             `json:"assets"`
-	Corrs  map[string][]float64 `json:"corrs"`
+	Assets  []string             `json:"assets"`
+	Corrs6m map[string][]float64 `json:"corrs6m"`
+	Corrs30 map[string][]float64 `json:"corrs30"`
 }
 
 func main() {
@@ -110,8 +111,9 @@ func main() {
 	}
 
 	plotData := PlotData{
-		Assets: assets,
-		Corrs:  make(map[string][]float64),
+		Assets:  assets,
+		Corrs6m: make(map[string][]float64),
+		Corrs30: make(map[string][]float64),
 	}
 
 	reportDate := endTime.Format("2006-01-02")
@@ -129,7 +131,7 @@ func main() {
 
 		if len(assetReturns) == 0 || len(dxyMap) == 0 {
 			log.Printf("警告: %s 数据为空，跳过", symbol)
-			plotData.Corrs[symbol] = []float64{0}
+			plotData.Corrs6m[symbol] = []float64{0}
 			report += fmt.Sprintf("%-5s vs DXY: N/A (数据不足)\n", symbol)
 			continue
 		}
@@ -150,14 +152,14 @@ func main() {
 
 		if len(validAsset) < 20 {
 			log.Printf("警告: %s 对齐后样本量不足 (%d < 20)，跳过", symbol, len(validAsset))
-			plotData.Corrs[symbol] = []float64{0}
+			plotData.Corrs6m[symbol] = []float64{0}
 			report += fmt.Sprintf("%-5s vs DXY: N/A (样本不足)\n", symbol)
 			continue
 		}
 
 		if hasZeroVariance(validAsset) || hasZeroVariance(validDXY) {
 			log.Printf("警告: %s 数据方差为0，无法计算相关性", symbol)
-			plotData.Corrs[symbol] = []float64{0}
+			plotData.Corrs6m[symbol] = []float64{0}
 			report += fmt.Sprintf("%-5s vs DXY: N/A (方差为0)\n", symbol)
 			continue
 		}
@@ -165,21 +167,23 @@ func main() {
 		corr6m := stat.Correlation(validAsset, validDXY, nil)
 		if math.IsNaN(corr6m) {
 			log.Printf("[%s] 6个月相关性计算结果为 NaN", symbol)
-			plotData.Corrs[symbol] = []float64{0}
+			plotData.Corrs6m[symbol] = []float64{0}
 			report += fmt.Sprintf("%-5s | 6mo: N/A | 30d: N/A | 状态: N/A\n", symbol)
 			continue
 		}
 
+		var corr30d float64
 		var corr30dStr string
 		var status string
 		if len(validAsset) >= 30 {
 			shortAsset := validAsset[len(validAsset)-30:]
 			shortDXY := validDXY[len(validDXY)-30:]
-			corr30d := stat.Correlation(shortAsset, shortDXY, nil)
+			corr30d = stat.Correlation(shortAsset, shortDXY, nil)
 			if math.IsNaN(corr30d) {
 				corr30dStr = "N/A"
 			} else {
 				corr30dStr = fmt.Sprintf("%.4f", corr30d)
+				plotData.Corrs30[symbol] = []float64{corr30d}
 				if corr30d < corr6m-0.2 || corr30d < -0.7 {
 					status = "🚨 引力场收缩"
 				} else if corr30d < -0.3 {
@@ -194,7 +198,7 @@ func main() {
 		}
 
 		log.Printf("[%s] 6mo: %.4f, 30d: %s, status: %s", symbol, corr6m, corr30dStr, status)
-		plotData.Corrs[symbol] = []float64{corr6m}
+		plotData.Corrs6m[symbol] = []float64{corr6m}
 
 		report += fmt.Sprintf("%-5s | 6mo: %.4f | 30d: %s | 状态: %s\n", symbol, corr6m, corr30dStr, status)
 	}
