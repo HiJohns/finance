@@ -65,6 +65,7 @@ type PlotData struct {
 
 func main() {
 	dateFlag := flag.String("date", "", "审计结束日期 (格式: YYYY-MM-DD)")
+	modeFlag := flag.String("mode", "prod", "运行模式: prod(生产) 或 test(测试)")
 	flag.Parse()
 
 	var endTime time.Time
@@ -244,8 +245,31 @@ func main() {
 		subjectPrefix = "[🔴流动性黑洞预警] "
 	}
 
+	vixStatus := "Normal"
+	if vixDxyCorr > 0.5 {
+		vixStatus = "⚠️ RESONANCE"
+	} else if vixDxyCorr > 0.3 {
+		vixStatus = "Caution"
+	}
+	report += fmt.Sprintf("\n【VIX-DXY Resonance】当前相关性: %.4f (%s)\n", vixDxyCorr, vixStatus)
+
+	subject := fmt.Sprintf("%sBeacon 审计: 宏观资产风险分析 [审计基准日: %s]", subjectPrefix, reportDate)
+
 	generateChart(plotData)
-	sendEmail(fmt.Sprintf("%sBeacon 审计: 宏观资产风险分析 [审计基准日: %s]", subjectPrefix, reportDate), report)
+
+	if *modeFlag == "test" {
+		fmt.Println("\n" + strings.Repeat("=", 60))
+		fmt.Println("📧 [TEST MODE] 邮件预览")
+		fmt.Println(strings.Repeat("=", 60))
+		fmt.Println("Subject:", subject)
+		fmt.Println(strings.Repeat("-", 60))
+		fmt.Println(report)
+		fmt.Println(strings.Repeat("=", 60))
+		fmt.Println("✅ 图表已生成 (audit_chart.png)")
+		fmt.Println("⏭️ 跳过邮件发送 (test mode)")
+	} else {
+		sendEmail(subject, report)
+	}
 }
 
 func getReturnsWithRetry(symbol string, endTime time.Time) ([]float64, []string, string) {
