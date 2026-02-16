@@ -26,37 +26,42 @@ def main():
         
         fig, ax = plt.subplots(figsize=(12, 6))
         
-        bars6m = ax.bar(x - width/2, values6m, width, label='6M Baseline', color='lightsteelblue')
+        ax.bar(x - width/2, values6m, width, label='6mo Baseline', color='#87CEEB')
         
         colors30 = []
-        deltas = []
         for i, v30 in enumerate(values30):
-            delta = v30 - values6m[i]
-            deltas.append(delta)
-            if delta < -0.2:
-                colors30.append('red')
+            v6m = values6m[i]
+            if v30 < -0.6 or v30 < (v6m - 0.2):
+                colors30.append('#FF4500')
             else:
-                colors30.append('steelblue')
+                colors30.append('#4682B4')
         
-        bars30 = ax.bar(x + width/2, values30, width, label='30D Current', color=colors30)
+        ax.bar(x + width/2, values30, width, label='30d Current', color=colors30)
         
-        ax.axhline(y=-0.7, color='red', linestyle='--', linewidth=1.5, label='Danger Zone')
+        ax.axhline(y=-0.7, color='red', linestyle='--', linewidth=1.5)
         
         ax.set_ylabel('Correlation')
-        ax.set_title('IronCore: Multi-Timeframe Correlation Audit')
+        ax.set_title('IronCore: Asset Correlation Trend Audit')
         ax.set_xticks(x)
         ax.set_xticklabels(names)
         ax.legend()
         ax.set_ylim(-1, 1)
         ax.grid(axis='y', linestyle='--', alpha=0.7)
         
-        for i, delta in enumerate(deltas):
-            if values30[i] != 0:
-                ax.annotate(f'Δ:{delta:.2f}', 
-                           xy=(x[i] + width/2, values30[i]),
-                           xytext=(0, 3),
+        for i, v in enumerate(values6m):
+            ax.annotate(f'{v:.3f}', 
+                       xy=(x[i] - width/2, v),
+                       xytext=(0, -10 if v < 0 else 3),
+                       textcoords='offset points',
+                       ha='center', va='top' if v < 0 else 'bottom', fontsize=8)
+        
+        for i, v in enumerate(values30):
+            if v != 0:
+                ax.annotate(f'{v:.3f}', 
+                           xy=(x[i] + width/2, v),
+                           xytext=(0, -10 if v < 0 else 3),
                            textcoords='offset points',
-                           ha='center', va='bottom', fontsize=8)
+                           ha='center', va='top' if v < 0 else 'bottom', fontsize=8)
         
         plt.tight_layout()
         plt.savefig("audit_chart.png")
