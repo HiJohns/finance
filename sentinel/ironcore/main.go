@@ -57,9 +57,10 @@ var (
 )
 
 type PlotData struct {
-	Assets  []string             `json:"assets"`
-	Corrs6m map[string][]float64 `json:"corrs6m"`
-	Corrs30 map[string][]float64 `json:"corrs30"`
+	Assets     []string             `json:"assets"`
+	Corrs6m    map[string][]float64 `json:"corrs6m"`
+	Corrs30    map[string][]float64 `json:"corrs30"`
+	VixDxyCorr float64              `json:"vix_dxy_corr"`
 }
 
 func main() {
@@ -110,10 +111,41 @@ func main() {
 		}
 	}
 
+	vixReturns, vixDates, _ := getReturnsWithRetry("^VIX", endTime)
+	var vixDxyCorr float64
+	vixWarning := ""
+	if vixReturns != nil && vixDates != nil && dxyReturns != nil && dxyDates != nil {
+		vixMap := make(map[string]float64)
+		for i, date := range vixDates {
+			vixMap[date] = vixReturns[i]
+		}
+		var alignedVix, alignedDxy []float64
+		for i, date := range dxyDates {
+			if v, ok := vixMap[date]; ok {
+				if !math.IsNaN(v) && !math.IsNaN(dxyReturns[i]) && !math.IsInf(v, 0) && !math.IsInf(dxyReturns[i], 0) {
+					alignedVix = append(alignedVix, v)
+					alignedDxy = append(alignedDxy, dxyReturns[i])
+				}
+			}
+		}
+		if len(alignedVix) >= 30 {
+			last30Vix := alignedVix[len(alignedVix)-30:]
+			last30Dxy := alignedDxy[len(alignedDxy)-30:]
+			vixDxyCorr = stat.Correlation(last30Vix, last30Dxy, nil)
+		}
+		log.Printf("[VIX-DXY] 30日相关性: %.4f", vixDxyCorr)
+		dxyTrend := dxyReturns[len(dxyReturns)-1]
+		if vixDxyCorr > 0.5 && dxyTrend > 0 {
+			vixWarning = "警告：VIX 与 DXY 出现正向共振，市场进入非理性抽血模式。\n"
+			log.Printf("[VIX-DXY] 🚨 流动性黑洞预警!")
+		}
+	}
+
 	plotData := PlotData{
-		Assets:  assets,
-		Corrs6m: make(map[string][]float64),
-		Corrs30: make(map[string][]float64),
+		Assets:     assets,
+		Corrs6m:    make(map[string][]float64),
+		Corrs30:    make(map[string][]float64),
+		VixDxyCorr: vixDxyCorr,
 	}
 
 	reportDate := endTime.Format("2006-01-02")
@@ -203,8 +235,17 @@ func main() {
 		report += fmt.Sprintf("%-5s | 6mo: %.4f | 30d: %s | 状态: %s\n", symbol, corr6m, corr30dStr, status)
 	}
 
+	if vixWarning != "" {
+		report = vixWarning + "\n" + report
+	}
+
+	subjectPrefix := ""
+	if vixWarning != "" {
+		subjectPrefix = "[🔴流动性黑洞预警] "
+	}
+
 	generateChart(plotData)
-	sendEmail(fmt.Sprintf("Beacon 审计: 宏观资产风险分析 [审计基准日: %s]", reportDate), report)
+	sendEmail(fmt.Sprintf("%sBeacon 审计: 宏观资产风险分析 [审计基准日: %s]", subjectPrefix, reportDate), report)
 }
 
 func getReturnsWithRetry(symbol string, endTime time.Time) ([]float64, []string, string) {

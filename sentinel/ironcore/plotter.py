@@ -21,10 +21,12 @@ def main():
             else:
                 values30.append(0)
         
+        vix_dxy_corr = data.get('vix_dxy_corr', 0)
+        
         x = np.arange(len(names))
         width = 0.35
         
-        fig, ax = plt.subplots(figsize=(12, 6))
+        fig, ax = plt.subplots(figsize=(12, 7))
         
         ax.bar(x - width/2, values6m, width, label='6mo Baseline', color='#87CEEB')
         
@@ -62,6 +64,17 @@ def main():
                            xytext=(0, -10 if v < 0 else 3),
                            textcoords='offset points',
                            ha='center', va='top' if v < 0 else 'bottom', fontsize=8)
+        
+        vix_color = 'red' if vix_dxy_corr > 0.5 else 'green'
+        props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+        ax.text(0.02, 0.98, f'VIX-DXY Corr: {vix_dxy_corr:.3f}', 
+                transform=ax.transAxes, fontsize=10, verticalalignment='top',
+                bbox=props, color=vix_color, fontweight='bold')
+        
+        if vix_dxy_corr > 0.5:
+            ax.text(0.02, 0.93, '⚠️ Liquidity Black Hole', 
+                    transform=ax.transAxes, fontsize=9, verticalalignment='top',
+                    color='red', fontweight='bold')
         
         plt.tight_layout()
         plt.savefig("audit_chart.png")
