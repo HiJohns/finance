@@ -147,7 +147,7 @@ var dashboardHTML = `
     <div class="section">
         <h2>📊 全球宏观标的</h2>
         <table>
-            <tr><th>标的</th><th>最新价</th><th>Market Price</th><th>收益率</th><th>6月相关</th><th>30日相关</th><th>3-Sigma</th><th>状态</th></tr>
+            <tr><th>标的</th><th>最新价</th><th>市场价格</th><th>收益率</th><th>6月相关</th><th>30日相关</th><th>3-Sigma</th><th>状态</th></tr>
             {{range .Assets}}
             {{if ne .CorrelationStatus "china"}}
             <tr>
@@ -168,7 +168,7 @@ var dashboardHTML = `
     <div class="section">
         <h2>🇨🇳 中国电力枢纽标的</h2>
         <table>
-            <tr><th>标的</th><th>最新价</th><th>Market Price</th><th>收益率</th><th>vs DXY</th><th>vs 沪深300</th><th>大盘关联</th><th>状态</th></tr>
+            <tr><th>标的</th><th>最新价</th><th>市场价格</th><th>收益率</th><th>vs DXY</th><th>vs 沪深300</th><th>大盘关联</th><th>状态</th></tr>
             {{range .Assets}}
             {{if eq .CorrelationStatus "china"}}
             <tr>
@@ -421,8 +421,8 @@ func getLatestMarketPrice(symbol string) float64 {
 	}
 	var price float64
 	normalizedSymbol := symbol
-	if strings.HasSuffix(symbol, ".SS") {
-		normalizedSymbol = strings.TrimSuffix(symbol, ".SS")
+	if strings.HasSuffix(symbol, ".SH") {
+		normalizedSymbol = strings.TrimSuffix(symbol, ".SH")
 	} else if strings.HasSuffix(symbol, ".SZ") {
 		normalizedSymbol = strings.TrimSuffix(symbol, ".SZ")
 	}
