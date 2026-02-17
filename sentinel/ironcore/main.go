@@ -79,6 +79,7 @@ type AssetStatus struct {
 	Symbol            string  `json:"symbol"`
 	Name              string  `json:"name"`
 	CurrentPrice      float64 `json:"current_price"`
+	MarketPrice       float64 `json:"market_price"`
 	Volume            float64 `json:"volume"`
 	LatestReturn      float64 `json:"latest_return"`
 	Corr6m            float64 `json:"corr_6m"`
@@ -146,12 +147,13 @@ var dashboardHTML = `
     <div class="section">
         <h2>📊 全球宏观标的</h2>
         <table>
-            <tr><th>标的</th><th>最新价</th><th>收益率</th><th>6月相关</th><th>30日相关</th><th>3-Sigma</th><th>状态</th></tr>
+            <tr><th>标的</th><th>最新价</th><th>Market Price</th><th>收益率</th><th>6月相关</th><th>30日相关</th><th>3-Sigma</th><th>状态</th></tr>
             {{range .Assets}}
             {{if ne .CorrelationStatus "china"}}
             <tr>
                 <td><strong>{{.Symbol}}</strong><br><small>{{.Name}}</small></td>
                 <td>{{printf "%.2f" .CurrentPrice}}</td>
+                <td>{{printf "%.2f" .MarketPrice}}</td>
                 <td>{{printf "%.2f" .LatestReturn}}%</td>
                 <td>{{printf "%.4f" .Corr6m}}</td>
                 <td>{{printf "%.4f" .Corr30d}}</td>
@@ -166,12 +168,13 @@ var dashboardHTML = `
     <div class="section">
         <h2>🇨🇳 中国电力枢纽标的</h2>
         <table>
-            <tr><th>标的</th><th>最新价</th><th>收益率</th><th>vs DXY</th><th>vs 沪深300</th><th>大盘关联</th><th>状态</th></tr>
+            <tr><th>标的</th><th>最新价</th><th>Market Price</th><th>收益率</th><th>vs DXY</th><th>vs 沪深300</th><th>大盘关联</th><th>状态</th></tr>
             {{range .Assets}}
             {{if eq .CorrelationStatus "china"}}
             <tr>
                 <td><strong>{{.Symbol}}</strong><br><small>{{.Name}}</small></td>
                 <td>{{printf "%.2f" .CurrentPrice}}</td>
+                <td>{{printf "%.2f" .MarketPrice}}</td>
                 <td>{{printf "%.2f" .LatestReturn}}%</td>
                 <td>{{printf "%.4f" .Corr30d}}</td>
                 <td>{{printf "%.4f" .HS300Corr}}</td>
@@ -412,6 +415,27 @@ func performAudit(endTime time.Time) {
 	log.Println("✅ 审计完成")
 }
 
+func getLatestMarketPrice(symbol string) float64 {
+	if db == nil {
+		return 0
+	}
+	var price float64
+	normalizedSymbol := symbol
+	if strings.HasSuffix(symbol, ".SS") {
+		normalizedSymbol = strings.TrimSuffix(symbol, ".SS")
+	} else if strings.HasSuffix(symbol, ".SZ") {
+		normalizedSymbol = strings.TrimSuffix(symbol, ".SZ")
+	}
+	err := db.QueryRow(
+		"SELECT price FROM market_data WHERE symbol LIKE ? ORDER BY timestamp DESC LIMIT 1",
+		normalizedSymbol+"%",
+	).Scan(&price)
+	if err != nil {
+		return 0
+	}
+	return price
+}
+
 func calculateAssetStatus(symbol string, dxyMap map[string]float64, endTime time.Time, assetType string) AssetStatus {
 	if strings.HasSuffix(symbol, ".SS") || strings.HasSuffix(symbol, ".SZ") {
 		assetType = "china"
@@ -445,6 +469,7 @@ func calculateAssetStatus(symbol string, dxyMap map[string]float64, endTime time
 	if len(returns) > 0 {
 		status.CurrentPrice = 100 * (1 + returns[len(returns)-1])
 		status.LatestReturn = returns[len(returns)-1] * 100
+		status.MarketPrice = getLatestMarketPrice(symbol)
 	}
 
 	var validAsset, validDXY []float64
