@@ -58,9 +58,9 @@ var (
 	receiver      string
 	dbPath        string
 	httpPort      string
-	AdminUser     string
-	AdminPass     string
-	SessionSecret string
+	AdminUser     string = "admin"
+	AdminPass     string = "admin123"
+	SessionSecret string = "test-secret-key"
 	version       string
 )
 
@@ -89,6 +89,7 @@ type AssetStatus struct {
 	AlertMessage      string  `json:"alert_message"`
 	HS300Corr         float64 `json:"hs300_corr"`
 	CorrelationStatus string  `json:"correlation_status"`
+	MarketStatus      string  `json:"market_status"`
 }
 
 type AuditStatus struct {
@@ -174,7 +175,7 @@ var dashboardHTML = `
                 <td>{{printf "%.2f" .LatestReturn}}%</td>
                 <td>{{printf "%.4f" .Corr30d}}</td>
                 <td>{{printf "%.4f" .HS300Corr}}</td>
-                <td>{{.CorrelationStatus}}</td>
+                <td>{{.MarketStatus}}</td>
                 <td>{{if .IsCritical}}<span class="alert">🚨 {{.AlertMessage}}</span>{{else}}<span class="safe">🟢 正常</span>{{end}}</td>
             </tr>
             {{end}}
@@ -362,11 +363,11 @@ func performAudit(endTime time.Time) {
 		if len(hs300Map) > 0 {
 			status.HS300Corr = calculateHS300Corr(symbol, hs300Map, endTime)
 			if status.HS300Corr > 0.6 {
-				status.CorrelationStatus = "跟随大盘内卷"
+				status.MarketStatus = "跟随大盘内卷"
 			} else if status.HS300Corr < 0.3 {
-				status.CorrelationStatus = "独立走强"
+				status.MarketStatus = "独立走强"
 			} else {
-				status.CorrelationStatus = "弱跟随"
+				status.MarketStatus = "弱跟随"
 			}
 		}
 		assetStatuses = append(assetStatuses, status)
