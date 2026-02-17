@@ -18,7 +18,8 @@ ADMIN_USER="${adminUser:-admin}"
 ADMIN_PASS="${adminPass:-}"
 SESSION_SECRET="${sessionSecret:-}"
 
-LD_FLAGS="-X main.smtpUser=${SMTP_USER} -X main.smtpPass=${SMTP_PASS} -X main.receiver=${RECEIVER} -X main.AdminUser=${ADMIN_USER} -X main.AdminPass=${ADMIN_PASS} -X main.SessionSecret=${SESSION_SECRET}"
+GIT_VERSION=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+LD_FLAGS="-X main.smtpUser=${SMTP_USER} -X main.smtpPass=${SMTP_PASS} -X main.receiver=${RECEIVER} -X main.AdminUser=${ADMIN_USER} -X main.AdminPass=${ADMIN_PASS} -X main.SessionSecret=${SESSION_SECRET} -X main.version=${GIT_VERSION}"
 
 echo "=== IronCore Build Script ==="
 

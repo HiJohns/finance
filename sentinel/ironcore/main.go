@@ -61,6 +61,7 @@ var (
 	AdminUser     string
 	AdminPass     string
 	SessionSecret string
+	version       string
 )
 
 type PlotData struct {
@@ -226,11 +227,17 @@ var loginHTML = `
 </html>`
 
 func main() {
+	versionFlag := flag.Bool("v", false, "显示版本")
 	dateFlag := flag.String("date", "", "审计结束日期 (格式: YYYY-MM-DD)")
 	_ = flag.String("mode", "prod", "运行模式: prod(生产) 或 test(测试)")
 	flag.StringVar(&dbPath, "db", "ironcore.db", "SQLite数据库路径")
 	flag.StringVar(&httpPort, "port", "9070", "HTTP服务端口")
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Println("IronCore version:", version)
+		os.Exit(0)
+	}
 
 	var endTime time.Time
 	if *dateFlag != "" {
