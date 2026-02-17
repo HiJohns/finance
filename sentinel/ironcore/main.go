@@ -2,10 +2,12 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"html/template"
 	"log"
 	"math"
 	"net/http"
@@ -15,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/piquette/finance-go"
 	"github.com/piquette/finance-go/chart"
 	"github.com/piquette/finance-go/datetime"
@@ -47,13 +50,12 @@ func (ct *customTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	return ct.RoundTripper.RoundTrip(req)
 }
 
-var now = time.Now
-
-// 🔒 安全注入位：编译时使用 -ldflags "-X main.smtpPass=..." 注入
 var (
 	smtpUser string
 	smtpPass string
 	receiver string
+	dbPath   string
+	httpPort string
 )
 
 type PlotData struct {
@@ -67,9 +69,115 @@ type PlotData struct {
 	VixDxyCorr  float64              `json:"vix_dxy_corr"`
 }
 
+type AssetStatus struct {
+	Symbol            string  `json:"symbol"`
+	Name              string  `json:"name"`
+	CurrentPrice      float64 `json:"current_price"`
+	Volume            float64 `json:"volume"`
+	LatestReturn      float64 `json:"latest_return"`
+	Corr6m            float64 `json:"corr_6m"`
+	Corr30d           float64 `json:"corr_30d"`
+	Sigma             float64 `json:"sigma"`
+	Mean              float64 `json:"mean"`
+	IsCritical        bool    `json:"is_critical"`
+	AlertMessage      string  `json:"alert_message"`
+	HS300Corr         float64 `json:"hs300_corr"`
+	CorrelationStatus string  `json:"correlation_status"`
+}
+
+type AuditStatus struct {
+	Timestamp        time.Time          `json:"timestamp"`
+	Assets           []AssetStatus      `json:"assets"`
+	VixDxyCorr       float64            `json:"vix_dxy_corr"`
+	VixWarning       bool               `json:"vix_warning"`
+	SilentPeriod     bool               `json:"silent_period"`
+	LastAlertTime    time.Time          `json:"last_alert_time"`
+	CorrAcceleration map[string]float64 `json:"corr_acceleration"`
+}
+
+var (
+	globalStatus AuditStatus
+	lastCorrMap  map[string]float64
+	db           *sql.DB
+)
+
+var dashboardHTML = `
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>IronCore 实时审计仪表盘</title>
+    <meta http-equiv="refresh" content="30">
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }
+        h1 { color: #00d4ff; }
+        .status-bar { padding: 15px; margin: 10px 0; border-radius: 8px; }
+        .normal { background: #0f3460; }
+        .warning { background: #53354a; }
+        .critical { background: #903749; animation: pulse 1s infinite; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #333; }
+        th { background: #16213e; color: #00d4ff; }
+        .alert { color: #ff6b6b; font-weight: bold; }
+        .safe { color: #51cf66; }
+        .section { margin-top: 30px; }
+        .timestamp { color: #888; font-size: 0.9em; }
+    </style>
+</head>
+<body>
+    <h1>⚡ IronCore 实时资产异动审计</h1>
+    <div class="status-bar {{if .SilentPeriod}}warning{{else}}normal{{end}}">
+        <strong>状态:</strong> {{if .SilentPeriod}}🔇 静默期 (开盘前30分钟){{else}}🟢 监控中{{end}} | 
+        <strong>VIX-DXY相关:</strong> {{printf "%.4f" .VixDxyCorr}} {{if .VixWarning}}<span class="alert">⚠️ 共振预警</span>{{end}} |
+        <span class="timestamp">更新: {{.Timestamp.Format "2006-01-02 15:04:05"}}</span>
+    </div>
+
+    <div class="section">
+        <h2>📊 全球宏观标的</h2>
+        <table>
+            <tr><th>标的</th><th>最新价</th><th>收益率</th><th>6月相关</th><th>30日相关</th><th>3-Sigma</th><th>状态</th></tr>
+            {{range .Assets}}
+            <tr>
+                <td><strong>{{.Symbol}}</strong><br><small>{{.Name}}</small></td>
+                <td>{{printf "%.2f" .CurrentPrice}}</td>
+                <td>{{printf "%.2f" .LatestReturn}}%</td>
+                <td>{{printf "%.4f" .Corr6m}}</td>
+                <td>{{printf "%.4f" .Corr30d}}</td>
+                <td>μ={{printf "%.4f" .Mean}}, σ={{printf "%.4f" .Sigma}}</td>
+                <td>{{if .IsCritical}}<span class="alert">🚨 {{.AlertMessage}}</span>{{else}}<span class="safe">🟢 正常</span>{{end}}</td>
+            </tr>
+            {{end}}
+        </table>
+    </div>
+
+    <div class="section">
+        <h2>🇨🇳 中国电力枢纽标的</h2>
+        <table>
+            <tr><th>标的</th><th>最新价</th><th>收益率</th><th>vs DXY</th><th>vs 沪深300</th><th>大盘关联</th><th>状态</th></tr>
+            {{range .Assets}}
+            {{if eq .CorrelationStatus "china"}}
+            <tr>
+                <td><strong>{{.Symbol}}</strong><br><small>{{.Name}}</small></td>
+                <td>{{printf "%.2f" .CurrentPrice}}</td>
+                <td>{{printf "%.2f" .LatestReturn}}%</td>
+                <td>{{printf "%.4f" .Corr30d}}</td>
+                <td>{{printf "%.4f" .HS300Corr}}</td>
+                <td>{{.CorrelationStatus}}</td>
+                <td>{{if .IsCritical}}<span class="alert">🚨 {{.AlertMessage}}</span>{{else}}<span class="safe">🟢 正常</span>{{end}}</td>
+            </tr>
+            {{end}}
+            {{end}}
+        </table>
+    </div>
+</body>
+</html>`
+
 func main() {
 	dateFlag := flag.String("date", "", "审计结束日期 (格式: YYYY-MM-DD)")
-	modeFlag := flag.String("mode", "prod", "运行模式: prod(生产) 或 test(测试)")
+	_ = flag.String("mode", "prod", "运行模式: prod(生产) 或 test(测试)")
+	flag.StringVar(&dbPath, "db", "ironcore.db", "SQLite数据库路径")
+	flag.StringVar(&httpPort, "port", "8080", "HTTP服务端口")
 	flag.Parse()
 
 	var endTime time.Time
@@ -84,33 +192,55 @@ func main() {
 		endTime = time.Now()
 	}
 
-	assets := []string{"AMD", "SLV", "USO", "GLD", "IWY"}
+	var err error
+	db, err = sql.Open("sqlite3", dbPath)
+	if err != nil {
+		log.Printf("数据库连接失败: %v", err)
+	} else {
+		defer db.Close()
+	}
+
+	globalStatus = AuditStatus{
+		Timestamp:        time.Now(),
+		Assets:           []AssetStatus{},
+		CorrAcceleration: make(map[string]float64),
+	}
+	lastCorrMap = make(map[string]float64)
+
+	go runAuditLoop(endTime)
+
+	http.HandleFunc("/", handleDashboard)
+	http.HandleFunc("/api/status", handleAPIStatus)
+	http.HandleFunc("/api/audit", handleTriggerAudit)
+
+	addr := ":" + httpPort
+	log.Printf("🚀 IronCore 服务启动: http://localhost%s", addr)
+	log.Fatal(http.ListenAndServe(addr, nil))
+}
+
+func runAuditLoop(baseTime time.Time) {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		endTime := baseTime.Add(time.Since(baseTime))
+		if endTime.Before(time.Now().Add(-24 * time.Hour)) {
+			endTime = time.Now()
+		}
+		performAudit(endTime)
+		<-ticker.C
+	}
+}
+
+func performAudit(endTime time.Time) {
+	log.Println("🔄 执行审计...")
+
+	assets := []string{"SRVR", "SLV", "USO", "GLD", "IWY"}
 	chinaPowerAssets := []string{"600406.SS", "002028.SZ", "002270.SZ", "688676.SS", "159326.SZ"}
 	hs300 := "000300.SS"
 	dxy := "DX-Y.NYB"
 
-	dxyReturns, dxyDates, dxySource := getReturnsWithRetry(dxy, endTime)
-	if dxyReturns == nil {
-		log.Printf("[DXY] 尝试备选: UUP")
-		dxyReturns, dxyDates, dxySource = getReturnsWithRetry("UUP", endTime)
-		if dxyReturns == nil {
-			log.Printf("[DXY] 尝试备选: EURUSD=X")
-			eurReturns, eurDates, _ := getReturnsWithRetry("EURUSD=X", endTime)
-			if eurReturns != nil {
-				dxyReturns = make([]float64, len(eurReturns))
-				dxyDates = eurDates
-				for i, r := range eurReturns {
-					if r != 0 {
-						dxyReturns[i] = -r
-					}
-				}
-				dxySource = "EURUSD=X (反转)"
-			} else {
-				dxySource = ""
-			}
-		}
-	}
-
+	dxyReturns, dxyDates, _ := getReturnsWithRetry(dxy, endTime)
 	dxyMap := make(map[string]float64)
 	if dxyReturns != nil && dxyDates != nil {
 		for i, date := range dxyDates {
@@ -124,12 +254,11 @@ func main() {
 		for i, date := range hs300Dates {
 			hs300Map[date] = hs300Returns[i]
 		}
-		log.Printf("[沪深300] 获取到 %d 条数据", len(hs300Returns))
 	}
 
 	vixReturns, vixDates, _ := getReturnsWithRetry("^VIX", endTime)
-	var vixDxyCorr float64
-	vixWarning := ""
+	vixDxyCorr := 0.0
+	vixWarning := false
 	if vixReturns != nil && vixDates != nil && dxyReturns != nil && dxyDates != nil {
 		vixMap := make(map[string]float64)
 		for i, date := range vixDates {
@@ -149,13 +278,48 @@ func main() {
 			last30Dxy := alignedDxy[len(alignedDxy)-30:]
 			vixDxyCorr = stat.Correlation(last30Vix, last30Dxy, nil)
 		}
-		log.Printf("[VIX-DXY] 30日相关性: %.4f", vixDxyCorr)
-		dxyTrend := dxyReturns[len(dxyReturns)-1]
-		if vixDxyCorr > 0.5 && dxyTrend > 0 {
-			vixWarning = "警告：VIX 与 DXY 出现正向共振，市场进入非理性抽血模式。\n"
+		if vixDxyCorr > 0.5 && dxyReturns[len(dxyReturns)-1] > 0 {
+			vixWarning = true
 			log.Printf("[VIX-DXY] 🚨 流动性黑洞预警!")
 		}
 	}
+
+	silentPeriod := isSilentPeriod()
+
+	var assetStatuses []AssetStatus
+
+	for _, symbol := range assets {
+		status := calculateAssetStatus(symbol, dxyMap, endTime, "global")
+		assetStatuses = append(assetStatuses, status)
+	}
+
+	for _, symbol := range chinaPowerAssets {
+		status := calculateAssetStatus(symbol, dxyMap, endTime, "china")
+		if len(hs300Map) > 0 {
+			status.HS300Corr = calculateHS300Corr(symbol, hs300Map, endTime)
+			if status.HS300Corr > 0.6 {
+				status.CorrelationStatus = "跟随大盘内卷"
+			} else if status.HS300Corr < 0.3 {
+				status.CorrelationStatus = "独立走强"
+			} else {
+				status.CorrelationStatus = "弱跟随"
+			}
+		}
+		assetStatuses = append(assetStatuses, status)
+	}
+
+	acceleration := calculateCorrAcceleration(assetStatuses)
+
+	globalStatus = AuditStatus{
+		Timestamp:        time.Now(),
+		Assets:           assetStatuses,
+		VixDxyCorr:       vixDxyCorr,
+		VixWarning:       vixWarning,
+		SilentPeriod:     silentPeriod,
+		CorrAcceleration: acceleration,
+	}
+
+	checkAndSendAlert(vixWarning, assetStatuses)
 
 	plotData := PlotData{
 		Assets:      assets,
@@ -168,235 +332,208 @@ func main() {
 		VixDxyCorr:  vixDxyCorr,
 	}
 
-	reportDate := endTime.Format("2006-01-02")
-	report := fmt.Sprintf("--- Beacon 资产审计报告 [%s] ---\n\n", reportDate)
-	report += "【美元引力场审计】\n"
-
-	if dxySource == "" {
-		report += "[CRITICAL] 数据源连接被封锁，请检查服务器 IP 或更换代理。\n"
-	} else {
-		report += fmt.Sprintf("美元指数基准: %s\n\n", dxySource)
-	}
-
-	for _, symbol := range assets {
-		assetReturns, assetDates, _ := getReturnsWithRetry(symbol, endTime)
-
-		if len(assetReturns) == 0 || len(dxyMap) == 0 {
-			log.Printf("警告: %s 数据为空，跳过", symbol)
-			plotData.Corrs6m[symbol] = []float64{0}
-			report += fmt.Sprintf("%-5s vs DXY: N/A (数据不足)\n", symbol)
-			continue
-		}
-
-		var validAsset, validDXY []float64
-		for i, date := range assetDates {
-			if _, ok := dxyMap[date]; ok {
-				ar := assetReturns[i]
-				dr := dxyMap[date]
-				if !math.IsNaN(ar) && !math.IsNaN(dr) && !math.IsInf(ar, 0) && !math.IsInf(dr, 0) {
-					validAsset = append(validAsset, ar)
-					validDXY = append(validDXY, dr)
-				}
-			}
-		}
-
-		log.Printf("[%s] 对齐后有效样本: %d", symbol, len(validAsset))
-
-		if len(validAsset) < 20 {
-			log.Printf("警告: %s 对齐后样本量不足 (%d < 20)，跳过", symbol, len(validAsset))
-			plotData.Corrs6m[symbol] = []float64{0}
-			report += fmt.Sprintf("%-5s vs DXY: N/A (样本不足)\n", symbol)
-			continue
-		}
-
-		if hasZeroVariance(validAsset) || hasZeroVariance(validDXY) {
-			log.Printf("警告: %s 数据方差为0，无法计算相关性", symbol)
-			plotData.Corrs6m[symbol] = []float64{0}
-			report += fmt.Sprintf("%-5s vs DXY: N/A (方差为0)\n", symbol)
-			continue
-		}
-
-		corr6m := stat.Correlation(validAsset, validDXY, nil)
-		if math.IsNaN(corr6m) {
-			log.Printf("[%s] 6个月相关性计算结果为 NaN", symbol)
-			plotData.Corrs6m[symbol] = []float64{0}
-			report += fmt.Sprintf("%-5s | 6mo: N/A | 30d: N/A | 状态: N/A\n", symbol)
-			continue
-		}
-
-		var corr30d float64
-		var corr30dStr string
-		var status string
-		if len(validAsset) >= 30 {
-			shortAsset := validAsset[len(validAsset)-30:]
-			shortDXY := validDXY[len(validDXY)-30:]
-			corr30d = stat.Correlation(shortAsset, shortDXY, nil)
-			if math.IsNaN(corr30d) {
-				corr30dStr = "N/A"
-			} else {
-				corr30dStr = fmt.Sprintf("%.4f", corr30d)
-				plotData.Corrs30[symbol] = []float64{corr30d}
-				if corr30d < corr6m-0.2 || corr30d < -0.7 {
-					status = "🚨 引力场收缩"
-				} else if corr30d < -0.3 {
-					status = "🟡 漂移"
-				} else {
-					status = "🟢 正常"
-				}
-			}
+	for _, a := range assetStatuses {
+		if a.CorrelationStatus == "global" {
+			plotData.Corrs6m[a.Symbol] = []float64{a.Corr6m}
+			plotData.Corrs30[a.Symbol] = []float64{a.Corr30d}
 		} else {
-			corr30dStr = "N/A"
-			status = "🟢 正常"
+			plotData.ChinaCorr6m[a.Symbol] = []float64{a.Corr6m}
+			plotData.ChinaCorr30[a.Symbol] = []float64{a.Corr30d}
+			plotData.ChinaCorrHS[a.Symbol] = []float64{a.HS300Corr}
 		}
-
-		log.Printf("[%s] 6mo: %.4f, 30d: %s, status: %s", symbol, corr6m, corr30dStr, status)
-		plotData.Corrs6m[symbol] = []float64{corr6m}
-
-		report += fmt.Sprintf("%-5s | 6mo: %.4f | 30d: %s | 状态: %s\n", symbol, corr6m, corr30dStr, status)
 	}
-
-	report += "\n【中国电力枢纽标的】(vs DXY & 沪深300)\n"
-	report += "标的说明: 600406.SS=国电南瑞, 002028.SZ=思源电气, 002270.SZ=华明装备, 688676.SS=金盘科技, 159326.SZ=电网设备ETF\n\n"
-
-	for _, symbol := range chinaPowerAssets {
-		assetReturns, assetDates, _ := getReturnsWithRetry(symbol, endTime)
-
-		if len(assetReturns) == 0 || len(dxyMap) == 0 {
-			log.Printf("警告: %s 数据为空，跳过", symbol)
-			plotData.ChinaCorr6m[symbol] = []float64{0}
-			plotData.ChinaCorrHS[symbol] = []float64{0}
-			report += fmt.Sprintf("%-10s vs DXY: N/A (数据不足)\n", symbol)
-			continue
-		}
-
-		var validAssetDXY, validDXYArr []float64
-		for i, date := range assetDates {
-			if _, ok := dxyMap[date]; ok {
-				ar := assetReturns[i]
-				dr := dxyMap[date]
-				if !math.IsNaN(ar) && !math.IsNaN(dr) && !math.IsInf(ar, 0) && !math.IsInf(dr, 0) {
-					validAssetDXY = append(validAssetDXY, ar)
-					validDXYArr = append(validDXYArr, dr)
-				}
-			}
-		}
-
-		log.Printf("[%s] 对齐DXY后有效样本: %d", symbol, len(validAssetDXY))
-
-		if len(validAssetDXY) < 20 {
-			log.Printf("警告: %s 对齐后样本量不足 (%d < 20)，跳过", symbol, len(validAssetDXY))
-			plotData.ChinaCorr6m[symbol] = []float64{0}
-			plotData.ChinaCorrHS[symbol] = []float64{0}
-			report += fmt.Sprintf("%-10s vs DXY: N/A (样本不足)\n", symbol)
-			continue
-		}
-
-		if hasZeroVariance(validAssetDXY) || hasZeroVariance(validDXYArr) {
-			log.Printf("警告: %s 数据方差为0，无法计算相关性", symbol)
-			plotData.ChinaCorr6m[symbol] = []float64{0}
-			plotData.ChinaCorrHS[symbol] = []float64{0}
-			report += fmt.Sprintf("%-10s vs DXY: N/A (方差为0)\n", symbol)
-			continue
-		}
-
-		corr6m := stat.Correlation(validAssetDXY, validDXYArr, nil)
-		if math.IsNaN(corr6m) {
-			log.Printf("[%s] 6个月相关性计算结果为 NaN", symbol)
-			plotData.ChinaCorr6m[symbol] = []float64{0}
-			plotData.ChinaCorrHS[symbol] = []float64{0}
-			report += fmt.Sprintf("%-10s | 6mo: N/A | 30d: N/A | 状态: N/A\n", symbol)
-			continue
-		}
-
-		var corr30d float64
-		var corr30dStr string
-		if len(validAssetDXY) >= 30 {
-			shortAsset := validAssetDXY[len(validAssetDXY)-30:]
-			shortDXY := validDXYArr[len(validDXYArr)-30:]
-			corr30d = stat.Correlation(shortAsset, shortDXY, nil)
-			if math.IsNaN(corr30d) {
-				corr30dStr = "N/A"
-			} else {
-				corr30dStr = fmt.Sprintf("%.4f", corr30d)
-				plotData.ChinaCorr30[symbol] = []float64{corr30d}
-			}
-		} else {
-			corr30dStr = "N/A"
-		}
-
-		log.Printf("[%s] 6mo vs DXY: %.4f, 30d: %s", symbol, corr6m, corr30dStr)
-		plotData.ChinaCorr6m[symbol] = []float64{corr6m}
-
-		var hsStatus string
-		var hsCorr float64
-		if len(hs300Map) > 0 && len(assetReturns) > 0 {
-			var validAssetHS, validHSArr []float64
-			for i, date := range assetDates {
-				if hsVal, ok := hs300Map[date]; ok {
-					ar := assetReturns[i]
-					if !math.IsNaN(ar) && !math.IsNaN(hsVal) && !math.IsInf(ar, 0) && !math.IsInf(hsVal, 0) {
-						validAssetHS = append(validAssetHS, ar)
-						validHSArr = append(validHSArr, hsVal)
-					}
-				}
-			}
-
-			if len(validAssetHS) >= 20 {
-				hsCorr = stat.Correlation(validAssetHS, validHSArr, nil)
-				if math.IsNaN(hsCorr) {
-					hsStatus = "N/A"
-				} else if hsCorr > 0.6 {
-					hsStatus = "跟随大盘内卷"
-				} else if hsCorr < 0.3 {
-					hsStatus = "独立走强"
-				} else {
-					hsStatus = "弱跟随"
-				}
-				plotData.ChinaCorrHS[symbol] = []float64{hsCorr}
-			} else {
-				hsStatus = "数据不足"
-			}
-		} else {
-			hsStatus = "沪深300数据缺失"
-		}
-
-		report += fmt.Sprintf("%-10s | 6mo: %.4f | 30d: %s | 沪深300相关性: %.4f (%s)\n", symbol, corr6m, corr30dStr, hsCorr, hsStatus)
-	}
-
-	if vixWarning != "" {
-		report = vixWarning + "\n" + report
-	}
-
-	subjectPrefix := ""
-	if vixWarning != "" {
-		subjectPrefix = "[🔴流动性黑洞预警] "
-	}
-
-	vixStatus := "Normal"
-	if vixDxyCorr > 0.5 {
-		vixStatus = "⚠️ RESONANCE"
-	} else if vixDxyCorr > 0.3 {
-		vixStatus = "Caution"
-	}
-	report += fmt.Sprintf("\n【VIX-DXY Resonance】当前相关性: %.4f (%s)\n", vixDxyCorr, vixStatus)
-
-	subject := fmt.Sprintf("%sBeacon 审计: 宏观资产风险分析 [审计基准日: %s]", subjectPrefix, reportDate)
 
 	generateChart(plotData)
+	log.Println("✅ 审计完成")
+}
 
-	if *modeFlag == "test" {
-		fmt.Println("\n" + strings.Repeat("=", 60))
-		fmt.Println("📧 [TEST MODE] 邮件预览")
-		fmt.Println(strings.Repeat("=", 60))
-		fmt.Println("Subject:", subject)
-		fmt.Println(strings.Repeat("-", 60))
-		fmt.Println(report)
-		fmt.Println(strings.Repeat("=", 60))
-		fmt.Println("✅ 图表已生成 (audit_chart.png)")
-		fmt.Println("⏭️ 跳过邮件发送 (test mode)")
-	} else {
-		sendEmail(subject, report)
+func calculateAssetStatus(symbol string, dxyMap map[string]float64, endTime time.Time, assetType string) AssetStatus {
+	status := AssetStatus{
+		Symbol:            symbol,
+		CorrelationStatus: assetType,
 	}
+
+	nameMap := map[string]string{
+		"SRVR":      "全球数据中心REIT",
+		"SLV":       "白银ETF",
+		"USO":       "原油ETF",
+		"GLD":       "黄金ETF",
+		"IWY":       "纳斯达克科技ETF",
+		"600406.SS": "国电南瑞",
+		"002028.SZ": "思源电气",
+		"002270.SZ": "华明装备",
+		"688676.SS": "金盘科技",
+		"159326.SZ": "电网设备ETF",
+	}
+	status.Name = nameMap[symbol]
+
+	returns, dates, _ := getReturnsWithRetry(symbol, endTime)
+	if returns == nil || len(returns) == 0 {
+		return status
+	}
+
+	if len(returns) > 0 {
+		status.CurrentPrice = 100 * (1 + returns[len(returns)-1])
+		status.LatestReturn = returns[len(returns)-1] * 100
+	}
+
+	var validAsset, validDXY []float64
+	for i, date := range dates {
+		if _, ok := dxyMap[date]; ok {
+			ar := returns[i]
+			dr := dxyMap[date]
+			if !math.IsNaN(ar) && !math.IsNaN(dr) && !math.IsInf(ar, 0) && !math.IsInf(dr, 0) {
+				validAsset = append(validAsset, ar)
+				validDXY = append(validDXY, dr)
+			}
+		}
+	}
+
+	if len(validAsset) >= 20 {
+		status.Corr6m = stat.Correlation(validAsset, validDXY, nil)
+		if len(validAsset) >= 30 {
+			status.Corr30d = stat.Correlation(validAsset[len(validAsset)-30:], validDXY[len(validDXY)-30:], nil)
+		}
+	}
+
+	if len(returns) >= 30 {
+		recentReturns := returns[len(returns)-30:]
+		sum := 0.0
+		for _, r := range recentReturns {
+			sum += r
+		}
+		status.Mean = sum / float64(len(recentReturns))
+
+		variance := 0.0
+		for _, r := range recentReturns {
+			diff := r - status.Mean
+			variance += diff * diff
+		}
+		status.Sigma = math.Sqrt(variance / float64(len(recentReturns)))
+
+		if len(returns) >= 2 {
+			latestReturn := returns[len(returns)-1]
+			if status.Sigma > 0 {
+				zScore := (latestReturn - status.Mean) / status.Sigma
+				if math.Abs(zScore) > 3.0 && !isSilentPeriod() {
+					status.IsCritical = true
+					status.AlertMessage = fmt.Sprintf("3-Sigma异动! z=%.2f", zScore)
+				}
+			}
+		}
+	}
+
+	return status
+}
+
+func calculateHS300Corr(symbol string, hs300Map map[string]float64, endTime time.Time) float64 {
+	returns, dates, _ := getReturnsWithRetry(symbol, endTime)
+	if returns == nil || len(returns) == 0 || len(hs300Map) == 0 {
+		return 0
+	}
+
+	var validAsset, validHS []float64
+	for i, date := range dates {
+		if hsVal, ok := hs300Map[date]; ok {
+			ar := returns[i]
+			if !math.IsNaN(ar) && !math.IsNaN(hsVal) && !math.IsInf(ar, 0) && !math.IsInf(hsVal, 0) {
+				validAsset = append(validAsset, ar)
+				validHS = append(validHS, hsVal)
+			}
+		}
+	}
+
+	if len(validAsset) >= 20 {
+		return stat.Correlation(validAsset, validHS, nil)
+	}
+	return 0
+}
+
+func calculateCorrAcceleration(assets []AssetStatus) map[string]float64 {
+	acceleration := make(map[string]float64)
+	for _, a := range assets {
+		if lastCorr, ok := lastCorrMap[a.Symbol]; ok {
+			delta := a.Corr30d - lastCorr
+			acceleration[a.Symbol] = delta
+		}
+		lastCorrMap[a.Symbol] = a.Corr30d
+	}
+	return acceleration
+}
+
+func isSilentPeriod() bool {
+	now := time.Now()
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	beijingNow := now.In(loc)
+
+	hour := beijingNow.Hour()
+	minute := beijingNow.Minute()
+
+	if hour == 9 && minute < 30 {
+		return true
+	}
+	return false
+}
+
+func checkAndSendAlert(vixWarning bool, assets []AssetStatus) {
+	if isSilentPeriod() {
+		log.Println("🔇 静默期，跳过报警")
+		return
+	}
+
+	shouldAlert := vixWarning
+
+	for _, a := range assets {
+		if a.IsCritical {
+			shouldAlert = true
+			break
+		}
+	}
+
+	if shouldAlert && smtpUser != "" && smtpPass != "" {
+		sendAlertEmail(vixWarning, assets)
+	}
+}
+
+func sendAlertEmail(vixWarning bool, assets []AssetStatus) {
+	subject := "[紧急预警] IronCore 检测到市场异动"
+	body := "--- IronCore 紧急预警 ---\n\n"
+
+	if vixWarning {
+		body += "🚨 VIX-DXY 强正相关共振！市场进入非理性抽血模式。\n\n"
+	}
+
+	body += "异动标的:\n"
+	for _, a := range assets {
+		if a.IsCritical {
+			body += fmt.Sprintf("  %s: %s (最新收益: %.2f%%)\n", a.Symbol, a.AlertMessage, a.LatestReturn*100)
+		}
+	}
+
+	body += fmt.Sprintf("\n时间: %s\n", time.Now().Format("2006-01-02 15:04:05"))
+
+	sendEmail(subject, body)
+	globalStatus.LastAlertTime = time.Now()
+	log.Println("📧 预警邮件已发送")
+}
+
+func handleDashboard(w http.ResponseWriter, r *http.Request) {
+	tmpl, err := template.New("dashboard").Parse(dashboardHTML)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	tmpl.Execute(w, globalStatus)
+}
+
+func handleAPIStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(globalStatus)
+}
+
+func handleTriggerAudit(w http.ResponseWriter, r *http.Request) {
+	go performAudit(time.Now())
+	w.Write([]byte(`{"status":"triggered"}`))
 }
 
 func getReturnsWithRetry(symbol string, endTime time.Time) ([]float64, []string, string) {
