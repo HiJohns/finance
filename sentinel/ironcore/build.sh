@@ -7,7 +7,7 @@ cd "$SCRIPT_DIR"
 BINARY_NAME="ironcore"
 REMOTE_USER="ubuntu"
 REMOTE_HOST="opencode.linxdeep.com"
-REMOTE_PATH="~/finance/"
+REMOTE_PATH="~/finance"
 PLOTTER_NAME="plotter.py"
 COLLECTOR_NAME="collector.py"
 

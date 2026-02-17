@@ -132,6 +132,9 @@ var dashboardHTML = `
 </head>
 <body>
     <h1>⚡ IronCore 实时资产异动审计</h1>
+    <div style="text-align: right; margin-bottom: 10px;">
+        <a href="/logout" style="color: #888; text-decoration: none;">[退出登录]</a>
+    </div>
     <div class="status-bar {{if .SilentPeriod}}warning{{else}}normal{{end}}">
         <strong>状态:</strong> {{if .SilentPeriod}}🔇 静默期 (开盘前30分钟){{else}}🟢 监控中{{end}} | 
         <strong>VIX-DXY相关:</strong> {{printf "%.4f" .VixDxyCorr}} {{if .VixWarning}}<span class="alert">⚠️ 共振预警</span>{{end}} |
@@ -400,6 +403,12 @@ func performAudit(endTime time.Time) {
 }
 
 func calculateAssetStatus(symbol string, dxyMap map[string]float64, endTime time.Time, assetType string) AssetStatus {
+	assetType = symbol
+	if strings.HasSuffix(symbol, ".SS") || strings.HasSuffix(symbol, ".SZ") {
+		assetType = "china"
+	} else {
+		assetType = "global"
+	}
 	status := AssetStatus{
 		Symbol:            symbol,
 		CorrelationStatus: assetType,
