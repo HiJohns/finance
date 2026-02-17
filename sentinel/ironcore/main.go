@@ -147,6 +147,7 @@ var dashboardHTML = `
         <table>
             <tr><th>标的</th><th>最新价</th><th>收益率</th><th>6月相关</th><th>30日相关</th><th>3-Sigma</th><th>状态</th></tr>
             {{range .Assets}}
+            {{if ne .CorrelationStatus "china"}}
             <tr>
                 <td><strong>{{.Symbol}}</strong><br><small>{{.Name}}</small></td>
                 <td>{{printf "%.2f" .CurrentPrice}}</td>
@@ -156,6 +157,7 @@ var dashboardHTML = `
                 <td>μ={{printf "%.4f" .Mean}}, σ={{printf "%.4f" .Sigma}}</td>
                 <td>{{if .IsCritical}}<span class="alert">🚨 {{.AlertMessage}}</span>{{else}}<span class="safe">🟢 正常</span>{{end}}</td>
             </tr>
+            {{end}}
             {{end}}
         </table>
     </div>
@@ -410,7 +412,6 @@ func performAudit(endTime time.Time) {
 }
 
 func calculateAssetStatus(symbol string, dxyMap map[string]float64, endTime time.Time, assetType string) AssetStatus {
-	assetType = symbol
 	if strings.HasSuffix(symbol, ".SS") || strings.HasSuffix(symbol, ".SZ") {
 		assetType = "china"
 	} else {
