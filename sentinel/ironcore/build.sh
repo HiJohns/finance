@@ -14,8 +14,11 @@ COLLECTOR_NAME="collector.py"
 SMTP_USER="${SMTP_USER:-linwx1978@qq.com}"
 SMTP_PASS="${smtpPass:-}"
 RECEIVER="${RECEIVER:-linwx1978@gmail.com}"
+ADMIN_USER="${adminUser:-admin}"
+ADMIN_PASS="${adminPass:-}"
+SESSION_SECRET="${sessionSecret:-}"
 
-LD_FLAGS="-X main.smtpUser=${SMTP_USER} -X main.smtpPass=${SMTP_PASS} -X main.receiver=${RECEIVER}"
+LD_FLAGS="-X main.smtpUser=${SMTP_USER} -X main.smtpPass=${SMTP_PASS} -X main.receiver=${RECEIVER} -X main.AdminUser=${ADMIN_USER} -X main.AdminPass=${ADMIN_PASS} -X main.SessionSecret=${SESSION_SECRET}"
 
 echo "=== IronCore Build Script ==="
 

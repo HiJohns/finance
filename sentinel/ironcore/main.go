@@ -2,6 +2,8 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -51,11 +53,14 @@ func (ct *customTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 }
 
 var (
-	smtpUser string
-	smtpPass string
-	receiver string
-	dbPath   string
-	httpPort string
+	smtpUser      string
+	smtpPass      string
+	receiver      string
+	dbPath        string
+	httpPort      string
+	AdminUser     string
+	AdminPass     string
+	SessionSecret string
 )
 
 type PlotData struct {
@@ -173,6 +178,50 @@ var dashboardHTML = `
 </body>
 </html>`
 
+var loginHTML = `
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>企业级分布式日志管理系统 v4.2</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@3.4.1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background: #f5f5f5; padding-top: 80px; }
+        .login-container { max-width: 400px; margin: 0 auto; background: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .login-title { text-align: center; color: #333; margin-bottom: 30px; }
+        .alert-info { background: #d9edf7; border-color: #bce8f1; color: #31708f; font-size: 12px; }
+        .footer { text-align: center; margin-top: 20px; color: #999; font-size: 11px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="login-container">
+            <h3 class="login-title">企业级分布式日志管理系统 v4.2</h3>
+            <div class="alert alert-info">
+                <strong>⚠️ 安全警示：</strong>本系统仅限授权人员访问，所有操作将自动记录 IP 地址及操作时间。
+            </div>
+            {{if .Error}}
+            <div class="alert alert-danger">{{.Error}}</div>
+            {{end}}
+            <form method="POST" action="/auth">
+                <div class="form-group">
+                    <label>Operator ID</label>
+                    <input type="text" name="username" class="form-control" placeholder="请输入操作员账号" required>
+                </div>
+                <div class="form-group">
+                    <label>Access Key</label>
+                    <input type="password" name="password" class="form-control" placeholder="请输入访问密钥" required>
+                </div>
+                <button type="submit" class="btn btn-primary btn-block">验证身份</button>
+            </form>
+            <div class="footer">
+                © 2024 企业技术架构部 | 系统版本 v4.2.0 | 构建时间: 2024-01-15
+            </div>
+        </div>
+    </div>
+</body>
+</html>`
+
 func main() {
 	dateFlag := flag.String("date", "", "审计结束日期 (格式: YYYY-MM-DD)")
 	_ = flag.String("mode", "prod", "运行模式: prod(生产) 或 test(测试)")
@@ -209,9 +258,12 @@ func main() {
 
 	go runAuditLoop(endTime)
 
-	http.HandleFunc("/", handleDashboard)
-	http.HandleFunc("/api/status", handleAPIStatus)
-	http.HandleFunc("/api/audit", handleTriggerAudit)
+	http.HandleFunc("/login", handleLogin)
+	http.HandleFunc("/auth", handleAuth)
+	http.HandleFunc("/logout", handleLogout)
+	http.HandleFunc("/", authMiddleware(handleDashboard))
+	http.HandleFunc("/api/status", authMiddleware(handleAPIStatus))
+	http.HandleFunc("/api/audit", authMiddleware(handleTriggerAudit))
 
 	addr := ":" + httpPort
 	log.Printf("🚀 IronCore 服务启动: http://localhost%s", addr)
@@ -534,6 +586,83 @@ func handleAPIStatus(w http.ResponseWriter, r *http.Request) {
 func handleTriggerAudit(w http.ResponseWriter, r *http.Request) {
 	go performAudit(time.Now())
 	w.Write([]byte(`{"status":"triggered"}`))
+}
+
+func handleLogin(w http.ResponseWriter, r *http.Request) {
+	tmpl, err := template.New("login").Parse(loginHTML)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	tmpl.Execute(w, map[string]string{})
+}
+
+func handleAuth(w http.ResponseWriter, r *http.Request) {
+	r.ParseForm()
+	username := r.Form.Get("username")
+	password := r.Form.Get("password")
+
+	if username == AdminUser && password == AdminPass {
+		signature := signCookie(username)
+		cookie := &http.Cookie{
+			Name:     "ironcore_session",
+			Value:    username + "|" + signature,
+			Path:     "/",
+			HttpOnly: true,
+			MaxAge:   86400 * 7,
+		}
+		http.SetCookie(w, cookie)
+		http.Redirect(w, r, "/", http.StatusFound)
+	} else {
+		tmpl, _ := template.New("login").Parse(loginHTML)
+		tmpl.Execute(w, map[string]string{"Error": "凭证无效，请重试"})
+	}
+}
+
+func handleLogout(w http.ResponseWriter, r *http.Request) {
+	cookie := &http.Cookie{
+		Name:   "ironcore_session",
+		Value:  "",
+		Path:   "/",
+		MaxAge: -1,
+	}
+	http.SetCookie(w, cookie)
+	http.Redirect(w, r, "/login", http.StatusFound)
+}
+
+func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/login" || r.URL.Path == "/auth" {
+			next(w, r)
+			return
+		}
+
+		cookie, err := r.Cookie("ironcore_session")
+		if err != nil || cookie == nil {
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
+
+		parts := strings.Split(cookie.Value, "|")
+		if len(parts) != 2 {
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
+
+		expectedSig := signCookie(parts[0])
+		if parts[1] != expectedSig {
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
+
+		next(w, r)
+	}
+}
+
+func signCookie(value string) string {
+	h := hmac.New(sha256.New, []byte(SessionSecret))
+	h.Write([]byte(value))
+	return base64.URLEncoding.EncodeToString(h.Sum(nil))
 }
 
 func getReturnsWithRetry(symbol string, endTime time.Time) ([]float64, []string, string) {
