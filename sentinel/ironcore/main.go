@@ -57,10 +57,14 @@ var (
 )
 
 type PlotData struct {
-	Assets     []string             `json:"assets"`
-	Corrs6m    map[string][]float64 `json:"corrs6m"`
-	Corrs30    map[string][]float64 `json:"corrs30"`
-	VixDxyCorr float64              `json:"vix_dxy_corr"`
+	Assets      []string             `json:"assets"`
+	ChinaAssets []string             `json:"china_assets"`
+	Corrs6m     map[string][]float64 `json:"corrs6m"`
+	Corrs30     map[string][]float64 `json:"corrs30"`
+	ChinaCorr6m map[string][]float64 `json:"china_corr6m"`
+	ChinaCorr30 map[string][]float64 `json:"china_corr30"`
+	ChinaCorrHS map[string][]float64 `json:"china_corr_hs"`
+	VixDxyCorr  float64              `json:"vix_dxy_corr"`
 }
 
 func main() {
@@ -81,6 +85,8 @@ func main() {
 	}
 
 	assets := []string{"AMD", "SLV", "USO", "GLD", "IWY"}
+	chinaPowerAssets := []string{"600406.SS", "002028.SZ", "002270.SZ", "688676.SS", "159326.SZ"}
+	hs300 := "000300.SS"
 	dxy := "DX-Y.NYB"
 
 	dxyReturns, dxyDates, dxySource := getReturnsWithRetry(dxy, endTime)
@@ -110,6 +116,15 @@ func main() {
 		for i, date := range dxyDates {
 			dxyMap[date] = dxyReturns[i]
 		}
+	}
+
+	hs300Returns, hs300Dates, _ := getReturnsWithRetry(hs300, endTime)
+	hs300Map := make(map[string]float64)
+	if hs300Returns != nil && hs300Dates != nil {
+		for i, date := range hs300Dates {
+			hs300Map[date] = hs300Returns[i]
+		}
+		log.Printf("[沪深300] 获取到 %d 条数据", len(hs300Returns))
 	}
 
 	vixReturns, vixDates, _ := getReturnsWithRetry("^VIX", endTime)
@@ -143,10 +158,14 @@ func main() {
 	}
 
 	plotData := PlotData{
-		Assets:     assets,
-		Corrs6m:    make(map[string][]float64),
-		Corrs30:    make(map[string][]float64),
-		VixDxyCorr: vixDxyCorr,
+		Assets:      assets,
+		ChinaAssets: chinaPowerAssets,
+		Corrs6m:     make(map[string][]float64),
+		Corrs30:     make(map[string][]float64),
+		ChinaCorr6m: make(map[string][]float64),
+		ChinaCorr30: make(map[string][]float64),
+		ChinaCorrHS: make(map[string][]float64),
+		VixDxyCorr:  vixDxyCorr,
 	}
 
 	reportDate := endTime.Format("2006-01-02")
@@ -234,6 +253,114 @@ func main() {
 		plotData.Corrs6m[symbol] = []float64{corr6m}
 
 		report += fmt.Sprintf("%-5s | 6mo: %.4f | 30d: %s | 状态: %s\n", symbol, corr6m, corr30dStr, status)
+	}
+
+	report += "\n【中国电力枢纽标的】(vs DXY & 沪深300)\n"
+	report += "标的说明: 600406.SS=国电南瑞, 002028.SZ=思源电气, 002270.SZ=华明装备, 688676.SS=金盘科技, 159326.SZ=电网设备ETF\n\n"
+
+	for _, symbol := range chinaPowerAssets {
+		assetReturns, assetDates, _ := getReturnsWithRetry(symbol, endTime)
+
+		if len(assetReturns) == 0 || len(dxyMap) == 0 {
+			log.Printf("警告: %s 数据为空，跳过", symbol)
+			plotData.ChinaCorr6m[symbol] = []float64{0}
+			plotData.ChinaCorrHS[symbol] = []float64{0}
+			report += fmt.Sprintf("%-10s vs DXY: N/A (数据不足)\n", symbol)
+			continue
+		}
+
+		var validAssetDXY, validDXYArr []float64
+		for i, date := range assetDates {
+			if _, ok := dxyMap[date]; ok {
+				ar := assetReturns[i]
+				dr := dxyMap[date]
+				if !math.IsNaN(ar) && !math.IsNaN(dr) && !math.IsInf(ar, 0) && !math.IsInf(dr, 0) {
+					validAssetDXY = append(validAssetDXY, ar)
+					validDXYArr = append(validDXYArr, dr)
+				}
+			}
+		}
+
+		log.Printf("[%s] 对齐DXY后有效样本: %d", symbol, len(validAssetDXY))
+
+		if len(validAssetDXY) < 20 {
+			log.Printf("警告: %s 对齐后样本量不足 (%d < 20)，跳过", symbol, len(validAssetDXY))
+			plotData.ChinaCorr6m[symbol] = []float64{0}
+			plotData.ChinaCorrHS[symbol] = []float64{0}
+			report += fmt.Sprintf("%-10s vs DXY: N/A (样本不足)\n", symbol)
+			continue
+		}
+
+		if hasZeroVariance(validAssetDXY) || hasZeroVariance(validDXYArr) {
+			log.Printf("警告: %s 数据方差为0，无法计算相关性", symbol)
+			plotData.ChinaCorr6m[symbol] = []float64{0}
+			plotData.ChinaCorrHS[symbol] = []float64{0}
+			report += fmt.Sprintf("%-10s vs DXY: N/A (方差为0)\n", symbol)
+			continue
+		}
+
+		corr6m := stat.Correlation(validAssetDXY, validDXYArr, nil)
+		if math.IsNaN(corr6m) {
+			log.Printf("[%s] 6个月相关性计算结果为 NaN", symbol)
+			plotData.ChinaCorr6m[symbol] = []float64{0}
+			plotData.ChinaCorrHS[symbol] = []float64{0}
+			report += fmt.Sprintf("%-10s | 6mo: N/A | 30d: N/A | 状态: N/A\n", symbol)
+			continue
+		}
+
+		var corr30d float64
+		var corr30dStr string
+		if len(validAssetDXY) >= 30 {
+			shortAsset := validAssetDXY[len(validAssetDXY)-30:]
+			shortDXY := validDXYArr[len(validDXYArr)-30:]
+			corr30d = stat.Correlation(shortAsset, shortDXY, nil)
+			if math.IsNaN(corr30d) {
+				corr30dStr = "N/A"
+			} else {
+				corr30dStr = fmt.Sprintf("%.4f", corr30d)
+				plotData.ChinaCorr30[symbol] = []float64{corr30d}
+			}
+		} else {
+			corr30dStr = "N/A"
+		}
+
+		log.Printf("[%s] 6mo vs DXY: %.4f, 30d: %s", symbol, corr6m, corr30dStr)
+		plotData.ChinaCorr6m[symbol] = []float64{corr6m}
+
+		var hsStatus string
+		var hsCorr float64
+		if len(hs300Map) > 0 && len(assetReturns) > 0 {
+			var validAssetHS, validHSArr []float64
+			for i, date := range assetDates {
+				if hsVal, ok := hs300Map[date]; ok {
+					ar := assetReturns[i]
+					if !math.IsNaN(ar) && !math.IsNaN(hsVal) && !math.IsInf(ar, 0) && !math.IsInf(hsVal, 0) {
+						validAssetHS = append(validAssetHS, ar)
+						validHSArr = append(validHSArr, hsVal)
+					}
+				}
+			}
+
+			if len(validAssetHS) >= 20 {
+				hsCorr = stat.Correlation(validAssetHS, validHSArr, nil)
+				if math.IsNaN(hsCorr) {
+					hsStatus = "N/A"
+				} else if hsCorr > 0.6 {
+					hsStatus = "跟随大盘内卷"
+				} else if hsCorr < 0.3 {
+					hsStatus = "独立走强"
+				} else {
+					hsStatus = "弱跟随"
+				}
+				plotData.ChinaCorrHS[symbol] = []float64{hsCorr}
+			} else {
+				hsStatus = "数据不足"
+			}
+		} else {
+			hsStatus = "沪深300数据缺失"
+		}
+
+		report += fmt.Sprintf("%-10s | 6mo: %.4f | 30d: %s | 沪深300相关性: %.4f (%s)\n", symbol, corr6m, corr30dStr, hsCorr, hsStatus)
 	}
 
 	if vixWarning != "" {
