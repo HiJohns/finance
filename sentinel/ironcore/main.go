@@ -177,7 +177,7 @@ func main() {
 	dateFlag := flag.String("date", "", "审计结束日期 (格式: YYYY-MM-DD)")
 	_ = flag.String("mode", "prod", "运行模式: prod(生产) 或 test(测试)")
 	flag.StringVar(&dbPath, "db", "ironcore.db", "SQLite数据库路径")
-	flag.StringVar(&httpPort, "port", "8080", "HTTP服务端口")
+	flag.StringVar(&httpPort, "port", "9070", "HTTP服务端口")
 	flag.Parse()
 
 	var endTime time.Time
