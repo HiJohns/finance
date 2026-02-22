@@ -78,6 +78,7 @@ type PlotData struct {
 type AssetStatus struct {
 	Symbol            string  `json:"symbol"`
 	Name              string  `json:"name"`
+	Tags              string  `json:"tags"`
 	CurrentPrice      float64 `json:"current_price"`
 	MarketPrice       float64 `json:"market_price"`
 	Volume            float64 `json:"volume"`
@@ -93,6 +94,14 @@ type AssetStatus struct {
 	MarketStatus      string  `json:"market_status"`
 }
 
+type ResonanceStatus struct {
+	IsActive        bool    `json:"is_active"`
+	SyncRate        float64 `json:"sync_rate"`
+	Confidence      string  `json:"confidence"`
+	TriggeredAssets string  `json:"triggered_assets"`
+	Message         string  `json:"message"`
+}
+
 type AuditStatus struct {
 	Timestamp        time.Time          `json:"timestamp"`
 	Assets           []AssetStatus      `json:"assets"`
@@ -101,6 +110,7 @@ type AuditStatus struct {
 	SilentPeriod     bool               `json:"silent_period"`
 	LastAlertTime    time.Time          `json:"last_alert_time"`
 	CorrAcceleration map[string]float64 `json:"corr_acceleration"`
+	Resonance        ResonanceStatus    `json:"resonance"`
 }
 
 var (
@@ -114,49 +124,86 @@ var dashboardHTML = `
 <html>
 <head>
     <meta charset="utf-8">
-    <title>IronCore 实时审计仪表盘</title>
+    <title>IronCore 2.0 实时审计仪表盘</title>
     <meta http-equiv="refresh" content="30">
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }
-        h1 { color: #00d4ff; }
+        h1 { color: #00d4ff; margin-bottom: 5px; }
+        .header-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .sync-btn { 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+            border: none; color: white; padding: 12px 24px; 
+            border-radius: 8px; cursor: pointer; font-size: 14px;
+            font-weight: bold; box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .sync-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6); }
         .status-bar { padding: 15px; margin: 10px 0; border-radius: 8px; }
         .normal { background: #0f3460; }
         .warning { background: #53354a; }
         .critical { background: #903749; animation: pulse 1s infinite; }
+        .resonance-active { background: linear-gradient(90deg, #11998e, #38ef7d); animation: pulse 1s infinite; }
         @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
         table { width: 100%; border-collapse: collapse; margin-top: 20px; }
         th, td { padding: 12px; text-align: left; border-bottom: 1px solid #333; }
         th { background: #16213e; color: #00d4ff; }
+        tr.critical-row { animation: critical-flash 1s infinite; background: rgba(255, 107, 107, 0.15); }
+        @keyframes critical-flash { 0%, 100% { background: rgba(255, 107, 107, 0.15); } 50% { background: rgba(255, 107, 107, 0.3); } }
         .alert { color: #ff6b6b; font-weight: bold; }
         .safe { color: #51cf66; }
+        .cyan { color: #00ffff; font-weight: bold; }
         .section { margin-top: 30px; }
         .timestamp { color: #888; font-size: 0.9em; }
+        .tag { display: inline-block; background: #2d3748; padding: 2px 8px; border-radius: 4px; font-size: 12px; margin-left: 5px; }
+        .market-price { color: #f6e05e; font-weight: bold; }
     </style>
+    <script>
+        function syncNow() {
+            fetch('/api/audit').then(r => r.json()).then(d => {
+                alert('已触发实时同步!');
+                location.reload();
+            });
+        }
+    </script>
 </head>
 <body>
-    <h1>⚡ IronCore 实时资产异动审计</h1>
+    <div class="header-bar">
+        <h1>⚡ IronCore 2.0 实时资产异动审计</h1>
+        <button class="sync-btn" onclick="syncNow()">🔄 立即同步实时引力场</button>
+    </div>
     <div style="text-align: right; margin-bottom: 10px;">
         <a href="/logout" style="color: #888; text-decoration: none;">[退出登录]</a>
     </div>
+    
+    {{if .Resonance.IsActive}}
+    <div class="status-bar resonance-active">
+        <strong>🔥 核心共振:</strong> {{.Resonance.Message}} | 
+        <strong>触发标的:</strong> {{.Resonance.TriggeredAssets}} |
+        <strong>同步率:</strong> {{printf "%.2f" .Resonance.SyncRate}} |
+        <strong>入场置信度:</strong> {{.Resonance.Confidence}}
+    </div>
+    {{else}}
     <div class="status-bar {{if .SilentPeriod}}warning{{else}}normal{{end}}">
         <strong>状态:</strong> {{if .SilentPeriod}}🔇 静默期 (开盘前30分钟){{else}}🟢 监控中{{end}} | 
         <strong>VIX-DXY相关:</strong> {{printf "%.4f" .VixDxyCorr}} {{if .VixWarning}}<span class="alert">⚠️ 共振预警</span>{{end}} |
         <span class="timestamp">更新: {{.Timestamp.Format "2006-01-02 15:04:05"}}</span>
     </div>
+    {{end}}
 
     <div class="section">
         <h2>📊 全球宏观标的</h2>
         <table>
-            <tr><th>标的</th><th>最新价</th><th>市场价格</th><th>收益率</th><th>6月相关</th><th>30日相关</th><th>3-Sigma</th><th>状态</th></tr>
+            <tr><th>标的</th><th>标签</th><th>最新价</th><th>Market Price</th><th>收益率</th><th>6月相关</th><th>30日相关</th><th>3-Sigma</th><th>状态</th></tr>
             {{range .Assets}}
             {{if ne .CorrelationStatus "china"}}
-            <tr>
+            <tr {{if .IsCritical}}class="critical-row"{{end}}>
                 <td><strong>{{.Symbol}}</strong><br><small>{{.Name}}</small></td>
+                <td>{{if .Tags}}<span class="tag">{{.Tags}}</span>{{end}}</td>
                 <td>{{printf "%.2f" .CurrentPrice}}</td>
-                <td>{{printf "%.2f" .MarketPrice}}</td>
+                <td><span class="market-price">{{printf "%.2f" .MarketPrice}}</span></td>
                 <td>{{printf "%.2f" .LatestReturn}}%</td>
-                <td>{{printf "%.4f" .Corr6m}}</td>
-                <td>{{printf "%.4f" .Corr30d}}</td>
+                <td {{if lt .Corr6m 0.1}}class="cyan"{{end}}>{{printf "%.4f" .Corr6m}}</td>
+                <td {{if lt .Corr30d 0.1}}class="cyan"{{end}}>{{printf "%.4f" .Corr30d}}</td>
                 <td>μ={{printf "%.4f" .Mean}}, σ={{printf "%.4f" .Sigma}}</td>
                 <td>{{if .IsCritical}}<span class="alert">🚨 {{.AlertMessage}}</span>{{else}}<span class="safe">🟢 正常</span>{{end}}</td>
             </tr>
@@ -168,16 +215,17 @@ var dashboardHTML = `
     <div class="section">
         <h2>🇨🇳 中国电力枢纽标的</h2>
         <table>
-            <tr><th>标的</th><th>最新价</th><th>市场价格</th><th>收益率</th><th>vs DXY</th><th>vs 沪深300</th><th>大盘关联</th><th>状态</th></tr>
+            <tr><th>标的</th><th>标签</th><th>最新价</th><th>Market Price</th><th>收益率</th><th>vs DXY</th><th>vs 沪深300</th><th>大盘关联</th><th>状态</th></tr>
             {{range .Assets}}
             {{if eq .CorrelationStatus "china"}}
-            <tr>
+            <tr {{if .IsCritical}}class="critical-row"{{end}}>
                 <td><strong>{{.Symbol}}</strong><br><small>{{.Name}}</small></td>
+                <td>{{if .Tags}}<span class="tag">{{.Tags}}</span>{{end}}</td>
                 <td>{{printf "%.2f" .CurrentPrice}}</td>
-                <td>{{printf "%.2f" .MarketPrice}}</td>
+                <td><span class="market-price">{{printf "%.2f" .MarketPrice}}</span></td>
                 <td>{{printf "%.2f" .LatestReturn}}%</td>
-                <td>{{printf "%.4f" .Corr30d}}</td>
-                <td>{{printf "%.4f" .HS300Corr}}</td>
+                <td {{if lt .Corr30d 0.1}}class="cyan"{{end}}>{{printf "%.4f" .Corr30d}}</td>
+                <td {{if lt .HS300Corr 0.1}}class="cyan"{{end}}>{{printf "%.4f" .HS300Corr}}</td>
                 <td>{{.MarketStatus}}</td>
                 <td>{{if .IsCritical}}<span class="alert">🚨 {{.AlertMessage}}</span>{{else}}<span class="safe">🟢 正常</span>{{end}}</td>
             </tr>
@@ -377,6 +425,7 @@ func performAudit(endTime time.Time) {
 	}
 
 	acceleration := calculateCorrAcceleration(assetStatuses)
+	resonance := calculateResonance(assetStatuses)
 
 	globalStatus = AuditStatus{
 		Timestamp:        time.Now(),
@@ -385,6 +434,7 @@ func performAudit(endTime time.Time) {
 		VixWarning:       vixWarning,
 		SilentPeriod:     silentPeriod,
 		CorrAcceleration: acceleration,
+		Resonance:        resonance,
 	}
 
 	checkAndSendAlert(vixWarning, assetStatuses)
@@ -421,7 +471,9 @@ func getLatestMarketPrice(symbol string) float64 {
 	}
 	var price float64
 	normalizedSymbol := symbol
-	if strings.HasSuffix(symbol, ".SH") {
+	if strings.HasSuffix(symbol, ".SS") {
+		normalizedSymbol = strings.TrimSuffix(symbol, ".SS")
+	} else if strings.HasSuffix(symbol, ".SH") {
 		normalizedSymbol = strings.TrimSuffix(symbol, ".SH")
 	} else if strings.HasSuffix(symbol, ".SZ") {
 		normalizedSymbol = strings.TrimSuffix(symbol, ".SZ")
@@ -459,7 +511,17 @@ func calculateAssetStatus(symbol string, dxyMap map[string]float64, endTime time
 		"688676.SS": "金盘科技",
 		"159326.SZ": "电网设备ETF",
 	}
+
+	tagMap := map[string]string{
+		"688676.SS": "🚀 AIDC-Leader",
+		"002028.SZ": "💎 Grid-Hard",
+		"002270.SZ": "💎 Grid-Hard",
+		"159326.SZ": "📊 Sector-Beta",
+		"SRVR":      "☁️ US-Compute",
+	}
+
 	status.Name = nameMap[symbol]
+	status.Tags = tagMap[symbol]
 
 	returns, dates, _ := getReturnsWithRetry(symbol, endTime)
 	if returns == nil || len(returns) == 0 {
@@ -554,6 +616,79 @@ func calculateCorrAcceleration(assets []AssetStatus) map[string]float64 {
 		lastCorrMap[a.Symbol] = a.Corr30d
 	}
 	return acceleration
+}
+
+func calculateResonance(assets []AssetStatus) ResonanceStatus {
+	gridHardAssets := []string{"002028.SZ", "002270.SZ"}
+	aidcAssets := []string{"688676.SS"}
+
+	var gridAssets, aidcAssetsStatus []AssetStatus
+	for _, a := range assets {
+		for _, g := range gridHardAssets {
+			if a.Symbol == g {
+				gridAssets = append(gridAssets, a)
+			}
+		}
+		for _, a2 := range aidcAssets {
+			if a.Symbol == a2 {
+				aidcAssetsStatus = append(aidcAssetsStatus, a)
+			}
+		}
+	}
+
+	gridTriggered := 0
+	aidcTriggered := 0
+	for _, a := range gridAssets {
+		if a.IsCritical {
+			gridTriggered++
+		}
+	}
+	for _, a := range aidcAssetsStatus {
+		if a.IsCritical {
+			aidcTriggered++
+		}
+	}
+
+	syncRate := 0.0
+	if len(gridAssets) > 0 && len(aidcAssetsStatus) > 0 {
+		totalCorr := 0.0
+		count := 0
+		for _, g := range gridAssets {
+			for _, a := range aidcAssetsStatus {
+				totalCorr += math.Abs(g.Corr30d - a.Corr30d)
+				count++
+			}
+		}
+		if count > 0 {
+			syncRate = 1.0 - (totalCorr / float64(count))
+		}
+	}
+
+	resonance := ResonanceStatus{
+		IsActive:        false,
+		SyncRate:        syncRate,
+		Confidence:      "低",
+		TriggeredAssets: "",
+		Message:         "无共振",
+	}
+
+	if (gridTriggered > 0 || aidcTriggered > 0) && syncRate < 0.5 {
+		resonance.IsActive = true
+		resonance.Confidence = "高"
+		resonance.SyncRate = syncRate
+		resonance.Message = "🔥 核心共振 全产业链造血中"
+
+		triggered := []string{}
+		if gridTriggered > 0 {
+			triggered = append(triggered, "Grid-Hard(思源/华明)")
+		}
+		if aidcTriggered > 0 {
+			triggered = append(triggered, "AIDC-Leader(金盘科技)")
+		}
+		resonance.TriggeredAssets = strings.Join(triggered, " + ")
+	}
+
+	return resonance
 }
 
 func isSilentPeriod() bool {
