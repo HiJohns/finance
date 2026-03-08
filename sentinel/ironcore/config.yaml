@@ -1,0 +1,97 @@
+# IronCore Configuration
+# 动态资产配置中心
+
+assets:
+  # 全球宏观标的 (Yahoo Finance)
+  global_macro:
+    - symbol: "SRVR"
+      name: "全球数据中心REIT"
+      source: "yahoo"
+      tags: ["US-Compute"]
+    - symbol: "SLV"
+      name: "白银ETF"
+      source: "yahoo"
+    - symbol: "USO"
+      name: "原油ETF"
+      source: "yahoo"
+    - symbol: "GLD"
+      name: "黄金ETF"
+      source: "yahoo"
+      sensitivity_multiplier: 1.5  # 地缘政治敏感资产
+    - symbol: "IWY"
+      name: "纳斯达克科技ETF"
+      source: "yahoo"
+    - symbol: "DX-Y.NYB"
+      name: "美元指数"
+      source: "yahoo"
+      is_benchmark: true
+    - symbol: "^VIX"
+      name: "波动率指数"
+      source: "yahoo"
+      is_sentiment_indicator: true
+
+  # 中国电力枢纽标的 (efinance)
+  china_power_grid:
+    - symbol: "600406.SS"
+      name: "国电南瑞"
+      source: "efinance"
+    - symbol: "002028.SZ"
+      name: "思源电气"
+      source: "efinance"
+      tags: ["Grid-Hard"]
+    - symbol: "002270.SZ"
+      name: "华明装备"
+      source: "efinance"
+      tags: ["Grid-Hard"]
+    - symbol: "688676.SS"
+      name: "金盘科技"
+      source: "efinance"
+      tags: ["AIDC-Leader"]
+    - symbol: "159326.SZ"
+      name: "电网设备ETF"
+      source: "efinance"
+      tags: ["Sector-Beta"]
+      auction_monitor: true  # 竞价监控标的
+
+  # 市场基准
+  benchmarks:
+    - symbol: "000300.SS"
+      name: "沪深300"
+      source: "efinance"
+
+# 哨兵关键词配置 (Sentinel Engine)
+sentinel_keywords:
+  geopolitical:
+    - "Hormuz"
+    - "Strait"
+    - "Sanctions"
+    - "Embargo"
+  supply_chain:
+    - "Ga2O3"
+    - "Gallium Oxide"
+    - "Transformer Shortage"
+    - "Power Grid"
+  macro:
+    - "Fed Rate"
+    - "Inflation"
+    - "Recession"
+
+# 告警阈值配置
+thresholds:
+  sigma_limit: 3.0
+  impact_score_high: 0.8
+  impact_score_critical: 0.9
+  auction_volume_multiplier: 2.0  # 竞价成交量 > 5日均值 2倍
+  correlation_divergence: 0.2
+
+# API 配置
+api:
+  news_provider: "gnews"  # 或 "newsapi"
+  llm_provider: "openai"  # 或自定义端点
+  config_reload_endpoint: "/api/reload-config"
+
+# 运行时配置
+runtime:
+  audit_interval_minutes: 10
+  auction_time: "09:25"
+  timezone: "Asia/Shanghai"

@@ -1,0 +1,768 @@
+diff --git a/sentinel/ironcore/collector.py b/sentinel/ironcore/collector.py
+index d6d5298..443a4a1 100644
+--- a/sentinel/ironcore/collector.py
++++ b/sentinel/ironcore/collector.py
+@@ -4,6 +4,8 @@ import time
+ import logging
+ import os
+ import sys
++import yaml
++from datetime import datetime
+ 
+ logging.basicConfig(
+     level=logging.INFO,
+@@ -12,20 +14,68 @@ logging.basicConfig(
+ logger = logging.getLogger(__name__)
+ 
+ DB_PATH = os.path.join(os.path.dirname(__file__), 'ironcore.db')
++CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'config.yaml')
+ 
+-CHINA_A_STOCKS = [
+-    '600406',  # 国电南瑞
+-    '002028',  # 思源电气
+-    '002270',  # 华明装备
+-    '688676',  # 金盘科技
+-    '159326',  # 电网设备ETF
+-]
+-
+-US_ASSETS = [
+-    'SRVR',    # 全球数据中心REIT
+-    'DX-Y.NYB', # DXY
+-    '^VIX',    # VIX
+-]
++class ConfigManager:
++    """Dynamic configuration manager for IronCore collector"""
++    
++    def __init__(self, config_path=CONFIG_PATH):
++        self.config_path = config_path
++        self.config = None
++        self.last_modified = 0
++        self.load_config()
++    
++    def load_config(self):
++        """Load configuration from YAML file"""
++        try:
++            with open(self.config_path, 'r', encoding='utf-8') as f:
++                self.config = yaml.safe_load(f)
++            self.last_modified = os.path.getmtime(self.config_path)
++            logger.info(f"Configuration loaded from {self.config_path}")
++            return True
++        except Exception as e:
++            logger.error(f"Failed to load config: {e}")
++            return False
++    
++    def reload_if_changed(self):
++        """Reload config if file has been modified"""
++        try:
++            current_mtime = os.path.getmtime(self.config_path)
++            if current_mtime > self.last_modified:
++                logger.info("Config file changed, reloading...")
++                return self.load_config()
++        except Exception as e:
++            logger.error(f"Failed to check config modification: {e}")
++        return False
++    
++    def get_china_stocks(self):
++        """Get China A-stock symbols from config"""
++        if not self.config:
++            return []
++        assets = self.config.get('assets', {})
++        china_assets = assets.get('china_power_grid', [])
++        return [asset['symbol'] for asset in china_assets if asset.get('symbol')]
++    
++    def get_us_assets(self):
++        """Get US asset symbols from config"""
++        if not self.config:
++            return []
++        assets = self.config.get('assets', {})
++        global_assets = assets.get('global_macro', [])
++        return [asset['symbol'] for asset in global_assets if asset.get('symbol')]
++    
++    def get_collection_interval(self):
++        """Get collection interval from config or environment"""
++        if self.config and 'runtime' in self.config:
++            minutes = self.config['runtime'].get('audit_interval_minutes', 10)
++            return minutes * 60
++        return int(os.environ.get('COLLECT_INTERVAL', 600))
++    
++    def get_timezone(self):
++        """Get timezone from config"""
++        if self.config and 'runtime' in self.config:
++            return self.config['runtime'].get('timezone', 'Asia/Shanghai')
++        return 'Asia/Shanghai'
+ 
+ def init_db():
+     conn = sqlite3.connect(DB_PATH)
+@@ -77,11 +127,18 @@ def try_import_yfinance():
+ 
+ def fetch_china_a_stock(efinance, symbol):
+     try:
+-        df = efinance.stock.get_quote(symbol)
++        # Remove .SS or .SZ suffix for efinance
++        clean_symbol = symbol
++        if symbol.endswith('.SS'):
++            clean_symbol = symbol[:-3]
++        elif symbol.endswith('.SZ'):
++            clean_symbol = symbol[:-3]
++        
++        df = efinance.stock.get_quote(clean_symbol)
+         if df is not None and not df.empty:
+             latest = df.iloc[-1]
+             return {
+-                'symbol': f"{symbol}.SH" if symbol.startswith('6') else f"{symbol}.SZ",
++                'symbol': symbol,  # Keep original symbol with suffix
+                 'price': float(latest.get('最新价', 0)),
+                 'volume': float(latest.get('成交量', 0))
+             }
+@@ -116,21 +173,24 @@ def save_to_db(conn, data_list):
+     conn.commit()
+     logger.info(f"Saved {len(data_list)} records to DB")
+ 
+-def is_market_closed():
+-    from datetime import datetime
+-    import pytz
+-    
+-    tz = pytz.timezone('Asia/Shanghai')
+-    now = datetime.now(tz)
+-    
+-    weekday = now.weekday()
+-    if weekday >= 5:
+-        return True
+-    
+-    return False
++def is_market_closed(config_manager):
++    try:
++        import pytz
++        
++        tz = pytz.timezone(config_manager.get_timezone())
++        now = datetime.now(tz)
++        
++        weekday = now.weekday()
++        if weekday >= 5:
++            return True
++        
++        return False
++    except Exception as e:
++        logger.error(f"Failed to check market status: {e}")
++        return False  # Default to open if we can't determine
+ 
+-def run_collection():
+-    if is_market_closed():
++def run_collection(config_manager):
++    if is_market_closed(config_manager):
+         logger.info("Market is closed on weekend, skipping collection")
+         return []
+     
+@@ -143,15 +203,22 @@ def run_collection():
+     
+     all_data = []
+     
++    # Get dynamic asset lists from config
++    china_stocks = config_manager.get_china_stocks()
++    us_assets = config_manager.get_us_assets()
++    
++    logger.info(f"Configured China stocks: {china_stocks}")
++    logger.info(f"Configured US assets: {us_assets}")
++    
+     if efinance:
+-        for symbol in CHINA_A_STOCKS:
++        for symbol in china_stocks:
+             data = fetch_china_a_stock(efinance, symbol)
+             if data:
+                 logger.info(f"Fetched {data['symbol']}: price={data['price']}, volume={data['volume']}")
+                 all_data.append(data)
+     
+     if yfinance:
+-        for symbol in US_ASSETS:
++        for symbol in us_assets:
+             data = fetch_us_asset(yfinance, symbol)
+             if data:
+                 logger.info(f"Fetched {data['symbol']}: price={data['price']}, volume={data['volume']}")
+@@ -166,16 +233,26 @@ def run_collection():
+     return all_data
+ 
+ def main():
+-    interval = int(os.environ.get('COLLECT_INTERVAL', 600))
++    config_manager = ConfigManager()
++    interval = config_manager.get_collection_interval()
+     logger.info(f"Collector starting with {interval}s interval")
+     
++    iteration = 0
++    
+     while True:
+         try:
+-            run_collection()
++            # Check for config changes every 10 iterations
++            iteration += 1
++            if iteration % 10 == 0:
++                if config_manager.reload_if_changed():
++                    interval = config_manager.get_collection_interval()
++                    logger.info(f"Interval updated to {interval}s")
++            
++            run_collection(config_manager)
+         except Exception as e:
+             logger.error(f"Collection error: {e}")
+         
+         time.sleep(interval)
+ 
+ if __name__ == '__main__':
+-    main()
+\ No newline at end of file
++    main()
+diff --git a/sentinel/ironcore/main.go b/sentinel/ironcore/main.go
+index 4d5e410..cd7ffaa 100644
+--- a/sentinel/ironcore/main.go
++++ b/sentinel/ironcore/main.go
+@@ -17,6 +17,7 @@ import (
+ 	"os"
+ 	"os/exec"
+ 	"strings"
++	"sync"
+ 	"time"
+ 
+ 	_ "github.com/mattn/go-sqlite3"
+@@ -24,6 +25,8 @@ import (
+ 	"github.com/piquette/finance-go/chart"
+ 	"github.com/piquette/finance-go/datetime"
+ 	"gonum.org/v1/gonum/stat"
++
++	yaml "gopkg.in/yaml.v3"
+ )
+ 
+ func init() {
+@@ -52,6 +55,55 @@ func (ct *customTransport) RoundTrip(req *http.Request) (*http.Response, error)
+ 	return ct.RoundTripper.RoundTrip(req)
+ }
+ 
++// Config represents the dynamic configuration
++type Config struct {
++	mu sync.RWMutex
++
++	Assets struct {
++		GlobalMacro    []AssetConfig `yaml:"global_macro"`
++		ChinaPowerGrid []AssetConfig `yaml:"china_power_grid"`
++		Benchmarks     []AssetConfig `yaml:"benchmarks"`
++	} `yaml:"assets"`
++
++	SentinelKeywords struct {
++		Geopolitical []string `yaml:"geopolitical"`
++		SupplyChain  []string `yaml:"supply_chain"`
++		Macro        []string `yaml:"macro"`
++	} `yaml:"sentinel_keywords"`
++
++	Thresholds struct {
++		SigmaLimit              float64 `yaml:"sigma_limit"`
++		ImpactScoreHigh         float64 `yaml:"impact_score_high"`
++		ImpactScoreCritical     float64 `yaml:"impact_score_critical"`
++		AuctionVolumeMultiplier float64 `yaml:"auction_volume_multiplier"`
++		CorrelationDivergence   float64 `yaml:"correlation_divergence"`
++	} `yaml:"thresholds"`
++
++	API struct {
++		NewsProvider         string `yaml:"news_provider"`
++		LLMProvider          string `yaml:"llm_provider"`
++		ConfigReloadEndpoint string `yaml:"config_reload_endpoint"`
++	} `yaml:"api"`
++
++	Runtime struct {
++		AuditIntervalMinutes int    `yaml:"audit_interval_minutes"`
++		AuctionTime          string `yaml:"auction_time"`
++		Timezone             string `yaml:"timezone"`
++	} `yaml:"runtime"`
++}
++
++// AssetConfig represents a single asset configuration
++type AssetConfig struct {
++	Symbol                string   `yaml:"symbol"`
++	Name                  string   `yaml:"name"`
++	Source                string   `yaml:"source"`
++	Tags                  []string `yaml:"tags,omitempty"`
++	IsBenchmark           bool     `yaml:"is_benchmark,omitempty"`
++	IsSentimentIndicator  bool     `yaml:"is_sentiment_indicator,omitempty"`
++	SensitivityMultiplier float64  `yaml:"sensitivity_multiplier,omitempty"`
++	AuctionMonitor        bool     `yaml:"auction_monitor,omitempty"`
++}
++
+ var (
+ 	smtpUser      string
+ 	smtpPass      string
+@@ -64,6 +116,161 @@ var (
+ 	version       string
+ )
+ 
++var (
++	globalConfig *Config
++	configPath   string = "config.yaml"
++)
++
++// GetAssets returns all configured assets safely
++func (c *Config) GetAssets() ([]AssetConfig, []AssetConfig, []AssetConfig) {
++	c.mu.RLock()
++	defer c.mu.RUnlock()
++	return c.Assets.GlobalMacro, c.Assets.ChinaPowerGrid, c.Assets.Benchmarks
++}
++
++// GetAssetBySymbol returns asset config by symbol
++func (c *Config) GetAssetBySymbol(symbol string) (AssetConfig, bool) {
++	c.mu.RLock()
++	defer c.mu.RUnlock()
++
++	allAssets := append(c.Assets.GlobalMacro, c.Assets.ChinaPowerGrid...)
++	allAssets = append(allAssets, c.Assets.Benchmarks...)
++
++	for _, asset := range allAssets {
++		if asset.Symbol == symbol {
++			return asset, true
++		}
++	}
++	return AssetConfig{}, false
++}
++
++// GetSentinelKeywords returns all sentinel keywords
++func (c *Config) GetSentinelKeywords() ([]string, []string, []string) {
++	c.mu.RLock()
++	defer c.mu.RUnlock()
++	return c.SentinelKeywords.Geopolitical, c.SentinelKeywords.SupplyChain, c.SentinelKeywords.Macro
++}
++
++// GetThresholds returns threshold values
++func (c *Config) GetThresholds() (float64, float64, float64) {
++	c.mu.RLock()
++	defer c.mu.RUnlock()
++	return c.Thresholds.SigmaLimit, c.Thresholds.ImpactScoreHigh, c.Thresholds.ImpactScoreCritical
++}
++
++// ReloadConfig reloads configuration from file
++func (c *Config) ReloadConfig() error {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++
++	data, err := os.ReadFile(configPath)
++	if err != nil {
++		return fmt.Errorf("failed to read config file: %w", err)
++	}
++
++	newConfig := &Config{}
++	if err := yaml.Unmarshal(data, newConfig); err != nil {
++		return fmt.Errorf("failed to parse config file: %w", err)
++	}
++
++	*c = *newConfig
++	log.Println("✅ Configuration reloaded successfully")
++	return nil
++}
++
++// LoadConfig loads configuration from file
++func LoadConfig(path string) (*Config, error) {
++	data, err := os.ReadFile(path)
++	if err != nil {
++		return nil, fmt.Errorf("failed to read config file: %w", err)
++	}
++
++	config := &Config{}
++	if err := yaml.Unmarshal(data, config); err != nil {
++		return nil, fmt.Errorf("failed to parse config file: %w", err)
++	}
++
++	// Set defaults if not specified
++	if config.Thresholds.SigmaLimit == 0 {
++		config.Thresholds.SigmaLimit = 3.0
++	}
++	if config.Thresholds.ImpactScoreHigh == 0 {
++		config.Thresholds.ImpactScoreHigh = 0.8
++	}
++	if config.Thresholds.ImpactScoreCritical == 0 {
++		config.Thresholds.ImpactScoreCritical = 0.9
++	}
++	if config.Thresholds.AuctionVolumeMultiplier == 0 {
++		config.Thresholds.AuctionVolumeMultiplier = 2.0
++	}
++	if config.Runtime.AuditIntervalMinutes == 0 {
++		config.Runtime.AuditIntervalMinutes = 10
++	}
++	if config.Runtime.Timezone == "" {
++		config.Runtime.Timezone = "Asia/Shanghai"
++	}
++
++	return config, nil
++}
++
++// GetAllAssetSymbols returns all asset symbols as string slices
++func (c *Config) GetAllAssetSymbols() ([]string, []string) {
++	c.mu.RLock()
++	defer c.mu.RUnlock()
++
++	globalSymbols := make([]string, len(c.Assets.GlobalMacro))
++	for i, asset := range c.Assets.GlobalMacro {
++		globalSymbols[i] = asset.Symbol
++	}
++
++	chinaSymbols := make([]string, len(c.Assets.ChinaPowerGrid))
++	for i, asset := range c.Assets.ChinaPowerGrid {
++		chinaSymbols[i] = asset.Symbol
++	}
++
++	return globalSymbols, chinaSymbols
++}
++
++// GetBenchmarkSymbol returns the benchmark symbol (HS300)
++func (c *Config) GetBenchmarkSymbol() string {
++	c.mu.RLock()
++	defer c.mu.RUnlock()
++
++	for _, asset := range c.Assets.Benchmarks {
++		if asset.Symbol == "000300.SS" {
++			return asset.Symbol
++		}
++	}
++	return "000300.SS" // fallback
++}
++
++// GetSentimentIndicator returns VIX symbol
++func (c *Config) GetSentimentIndicator() string {
++	c.mu.RLock()
++	defer c.mu.RUnlock()
++
++	for _, asset := range c.Assets.GlobalMacro {
++		if asset.IsSentimentIndicator {
++			return asset.Symbol
++		}
++	}
++	return "^VIX" // fallback
++}
++
++// GetAuctionMonitorAssets returns assets marked for auction monitoring
++func (c *Config) GetAuctionMonitorAssets() []AssetConfig {
++	c.mu.RLock()
++	defer c.mu.RUnlock()
++
++	var auctionAssets []AssetConfig
++	for _, asset := range c.Assets.ChinaPowerGrid {
++		if asset.AuctionMonitor {
++			auctionAssets = append(auctionAssets, asset)
++		}
++	}
++	return auctionAssets
++}
++
+ type PlotData struct {
+ 	Assets      []string             `json:"assets"`
+ 	ChinaAssets []string             `json:"china_assets"`
+@@ -184,7 +391,7 @@ var dashboardHTML = `
+     </div>
+     {{else}}
+     <div class="status-bar {{if .SilentPeriod}}warning{{else}}normal{{end}}">
+-        <strong>状态:</strong> {{if .SilentPeriod}}🔇 静默期 (开盘前30分钟){{else}}🟢 监控中{{end}} | 
++        <strong>状态:</strong> {{if .SilentPeriod}}🔇 静默期 (周末/开盘前){{else}}🟢 监控中{{end}} | 
+         <strong>VIX-DXY相关:</strong> {{printf "%.4f" .VixDxyCorr}} {{if .VixWarning}}<span class="alert">⚠️ 共振预警</span>{{end}} |
+         <span class="timestamp">更新: {{.Timestamp.Format "2006-01-02 15:04:05"}}</span>
+     </div>
+@@ -286,6 +493,7 @@ func main() {
+ 	_ = flag.String("mode", "prod", "运行模式: prod(生产) 或 test(测试)")
+ 	flag.StringVar(&dbPath, "db", "ironcore.db", "SQLite数据库路径")
+ 	flag.StringVar(&httpPort, "port", "9070", "HTTP服务端口")
++	flag.StringVar(&configPath, "config", "config.yaml", "配置文件路径")
+ 	flag.Parse()
+ 
+ 	if *versionFlag {
+@@ -293,9 +501,16 @@ func main() {
+ 		os.Exit(0)
+ 	}
+ 
++	// Load configuration
++	var err error
++	globalConfig, err = LoadConfig(configPath)
++	if err != nil {
++		log.Fatalf("Failed to load config: %v", err)
++	}
++	log.Printf("✅ Configuration loaded from %s", configPath)
++
+ 	var endTime time.Time
+ 	if *dateFlag != "" {
+-		var err error
+ 		endTime, err = time.Parse("2006-01-02", *dateFlag)
+ 		if err != nil {
+ 			log.Printf("日期解析失败，使用当前时间: %v", err)
+@@ -305,7 +520,6 @@ func main() {
+ 		endTime = time.Now()
+ 	}
+ 
+-	var err error
+ 	db, err = sql.Open("sqlite3", dbPath)
+ 	if err != nil {
+ 		log.Printf("数据库连接失败: %v", err)
+@@ -328,6 +542,7 @@ func main() {
+ 	http.HandleFunc("/", authMiddleware(handleDashboard))
+ 	http.HandleFunc("/api/status", authMiddleware(handleAPIStatus))
+ 	http.HandleFunc("/api/audit", authMiddleware(handleTriggerAudit))
++	http.HandleFunc("/api/reload-config", authMiddleware(handleReloadConfig))
+ 
+ 	addr := ":" + httpPort
+ 	log.Printf("🚀 IronCore 服务启动: http://localhost%s", addr)
+@@ -335,7 +550,12 @@ func main() {
+ }
+ 
+ func runAuditLoop(baseTime time.Time) {
+-	ticker := time.NewTicker(10 * time.Minute)
++	interval := time.Duration(globalConfig.Runtime.AuditIntervalMinutes) * time.Minute
++	if interval == 0 {
++		interval = 10 * time.Minute
++	}
++
++	ticker := time.NewTicker(interval)
+ 	defer ticker.Stop()
+ 
+ 	for {
+@@ -351,12 +571,37 @@ func runAuditLoop(baseTime time.Time) {
+ func performAudit(endTime time.Time) {
+ 	log.Println("🔄 执行审计...")
+ 
+-	assets := []string{"SRVR", "SLV", "USO", "GLD", "IWY"}
+-	chinaPowerAssets := []string{"600406.SS", "002028.SZ", "002270.SZ", "688676.SS", "159326.SZ"}
+-	hs300 := "000300.SS"
+-	dxy := "DX-Y.NYB"
++	// Get assets from config
++	globalAssets, chinaAssets, benchmarks := globalConfig.GetAssets()
++
++	// Find DXY benchmark
++	var dxySymbol string
++	for _, asset := range globalAssets {
++		if asset.Symbol == "DX-Y.NYB" {
++			dxySymbol = asset.Symbol
++			break
++		}
++	}
++	if dxySymbol == "" {
++		dxySymbol = "DX-Y.NYB"
++	}
++
++	// Find HS300
++	var hs300 string
++	for _, asset := range benchmarks {
++		if asset.Symbol == "000300.SS" {
++			hs300 = asset.Symbol
++			break
++		}
++	}
++	if hs300 == "" {
++		hs300 = "000300.SS"
++	}
++
++	// Get VIX symbol
++	vixSymbol := globalConfig.GetSentimentIndicator()
+ 
+-	dxyReturns, dxyDates, _ := getReturnsWithRetry(dxy, endTime)
++	dxyReturns, dxyDates, _ := getReturnsWithRetry(dxySymbol, endTime)
+ 	dxyMap := make(map[string]float64)
+ 	if dxyReturns != nil && dxyDates != nil {
+ 		for i, date := range dxyDates {
+@@ -372,7 +617,7 @@ func performAudit(endTime time.Time) {
+ 		}
+ 	}
+ 
+-	vixReturns, vixDates, _ := getReturnsWithRetry("^VIX", endTime)
++	vixReturns, vixDates, _ := getReturnsWithRetry(vixSymbol, endTime)
+ 	vixDxyCorr := 0.0
+ 	vixWarning := false
+ 	if vixReturns != nil && vixDates != nil && dxyReturns != nil && dxyDates != nil {
+@@ -404,15 +649,17 @@ func performAudit(endTime time.Time) {
+ 
+ 	var assetStatuses []AssetStatus
+ 
+-	for _, symbol := range assets {
+-		status := calculateAssetStatus(symbol, dxyMap, endTime, "global")
++	// Process global assets
++	for _, asset := range globalAssets {
++		status := calculateAssetStatusWithConfig(asset, dxyMap, endTime, "global")
+ 		assetStatuses = append(assetStatuses, status)
+ 	}
+ 
+-	for _, symbol := range chinaPowerAssets {
+-		status := calculateAssetStatus(symbol, dxyMap, endTime, "china")
++	// Process China power grid assets
++	for _, asset := range chinaAssets {
++		status := calculateAssetStatusWithConfig(asset, dxyMap, endTime, "china")
+ 		if len(hs300Map) > 0 {
+-			status.HS300Corr = calculateHS300Corr(symbol, hs300Map, endTime)
++			status.HS300Corr = calculateHS300Corr(asset.Symbol, hs300Map, endTime)
+ 			if status.HS300Corr > 0.6 {
+ 				status.MarketStatus = "跟随大盘内卷"
+ 			} else if status.HS300Corr < 0.3 {
+@@ -439,9 +686,19 @@ func performAudit(endTime time.Time) {
+ 
+ 	checkAndSendAlert(vixWarning, assetStatuses)
+ 
++	// Build plot data
++	plotAssets := make([]string, len(globalAssets))
++	for i, a := range globalAssets {
++		plotAssets[i] = a.Symbol
++	}
++	plotChinaAssets := make([]string, len(chinaAssets))
++	for i, a := range chinaAssets {
++		plotChinaAssets[i] = a.Symbol
++	}
++
+ 	plotData := PlotData{
+-		Assets:      assets,
+-		ChinaAssets: chinaPowerAssets,
++		Assets:      plotAssets,
++		ChinaAssets: plotChinaAssets,
+ 		Corrs6m:     make(map[string][]float64),
+ 		Corrs30:     make(map[string][]float64),
+ 		ChinaCorr6m: make(map[string][]float64),
+@@ -488,42 +745,25 @@ func getLatestMarketPrice(symbol string) float64 {
+ 	return price
+ }
+ 
+-func calculateAssetStatus(symbol string, dxyMap map[string]float64, endTime time.Time, assetType string) AssetStatus {
+-	if strings.HasSuffix(symbol, ".SS") || strings.HasSuffix(symbol, ".SZ") {
++func calculateAssetStatusWithConfig(asset AssetConfig, dxyMap map[string]float64, endTime time.Time, assetType string) AssetStatus {
++	if strings.HasSuffix(asset.Symbol, ".SS") || strings.HasSuffix(asset.Symbol, ".SZ") {
+ 		assetType = "china"
+ 	} else {
+ 		assetType = "global"
+ 	}
++
+ 	status := AssetStatus{
+-		Symbol:            symbol,
++		Symbol:            asset.Symbol,
++		Name:              asset.Name,
+ 		CorrelationStatus: assetType,
+ 	}
+ 
+-	nameMap := map[string]string{
+-		"SRVR":      "全球数据中心REIT",
+-		"SLV":       "白银ETF",
+-		"USO":       "原油ETF",
+-		"GLD":       "黄金ETF",
+-		"IWY":       "纳斯达克科技ETF",
+-		"600406.SS": "国电南瑞",
+-		"002028.SZ": "思源电气",
+-		"002270.SZ": "华明装备",
+-		"688676.SS": "金盘科技",
+-		"159326.SZ": "电网设备ETF",
++	// Format tags
++	if len(asset.Tags) > 0 {
++		status.Tags = strings.Join(asset.Tags, " ")
+ 	}
+ 
+-	tagMap := map[string]string{
+-		"688676.SS": "🚀 AIDC-Leader",
+-		"002028.SZ": "💎 Grid-Hard",
+-		"002270.SZ": "💎 Grid-Hard",
+-		"159326.SZ": "📊 Sector-Beta",
+-		"SRVR":      "☁️ US-Compute",
+-	}
+-
+-	status.Name = nameMap[symbol]
+-	status.Tags = tagMap[symbol]
+-
+-	returns, dates, _ := getReturnsWithRetry(symbol, endTime)
++	returns, dates, _ := getReturnsWithRetry(asset.Symbol, endTime)
+ 	if returns == nil || len(returns) == 0 {
+ 		return status
+ 	}
+@@ -531,7 +771,7 @@ func calculateAssetStatus(symbol string, dxyMap map[string]float64, endTime time
+ 	if len(returns) > 0 {
+ 		status.CurrentPrice = 100 * (1 + returns[len(returns)-1])
+ 		status.LatestReturn = returns[len(returns)-1] * 100
+-		status.MarketPrice = getLatestMarketPrice(symbol)
++		status.MarketPrice = getLatestMarketPrice(asset.Symbol)
+ 	}
+ 
+ 	var validAsset, validDXY []float64
+@@ -553,6 +793,11 @@ func calculateAssetStatus(symbol string, dxyMap map[string]float64, endTime time
+ 		}
+ 	}
+ 
++	sigmaLimit, _, _ := globalConfig.GetThresholds()
++	if sigmaLimit == 0 {
++		sigmaLimit = 3.0
++	}
++
+ 	if len(returns) >= 30 {
+ 		recentReturns := returns[len(returns)-30:]
+ 		sum := 0.0
+@@ -572,9 +817,9 @@ func calculateAssetStatus(symbol string, dxyMap map[string]float64, endTime time
+ 			latestReturn := returns[len(returns)-1]
+ 			if status.Sigma > 0 {
+ 				zScore := (latestReturn - status.Mean) / status.Sigma
+-				if math.Abs(zScore) > 3.0 && !isSilentPeriod() {
++				if math.Abs(zScore) > sigmaLimit && !isSilentPeriod() {
+ 					status.IsCritical = true
+-					status.AlertMessage = fmt.Sprintf("3-Sigma异动! z=%.2f", zScore)
++					status.AlertMessage = fmt.Sprintf("%.1f-Sigma异动! z=%.2f", sigmaLimit, zScore)
+ 				}
+ 			}
+ 		}
+@@ -619,8 +864,21 @@ func calculateCorrAcceleration(assets []AssetStatus) map[string]float64 {
+ }
+ 
+ func calculateResonance(assets []AssetStatus) ResonanceStatus {
+-	gridHardAssets := []string{"002028.SZ", "002270.SZ"}
+-	aidcAssets := []string{"688676.SS"}
++	// Get Grid-Hard and AIDC assets from config
++	gridHardAssets := []string{}
++	aidcAssets := []string{}
++
++	_, chinaAssets, _ := globalConfig.GetAssets()
++	for _, asset := range chinaAssets {
++		for _, tag := range asset.Tags {
++			if tag == "Grid-Hard" {
++				gridHardAssets = append(gridHardAssets, asset.Symbol)
++			}
++			if tag == "AIDC-Leader" {
++				aidcAssets = append(aidcAssets, asset.Symbol)
++			}
++		}
++	}
+ 
+ 	var gridAssets, aidcAssetsStatus []AssetStatus
+ 	for _, a := range assets {
+@@ -680,10 +938,10 @@ func calculateResonance(assets []AssetStatus) ResonanceStatus {
+ 
+ 		triggered := []string{}
+ 		if gridTriggered > 0 {
+-			triggered = append(triggered, "Grid-Hard(思源/华明)")
++			triggered = append(triggered, "Grid-Hard")
+ 		}
+ 		if aidcTriggered > 0 {
+-			triggered = append(triggered, "AIDC-Leader(金盘科技)")
++			triggered = append(triggered, "AIDC-Leader")
+ 		}
+ 		resonance.TriggeredAssets = strings.Join(triggered, " + ")
+ 	}
+@@ -693,7 +951,10 @@ func calculateResonance(assets []AssetStatus) ResonanceStatus {
+ 
+ func isSilentPeriod() bool {
+ 	now := time.Now()
+-	loc, _ := time.LoadLocation("Asia/Shanghai")
++	loc, _ := time.LoadLocation(globalConfig.Runtime.Timezone)
++	if loc == nil {
++		loc, _ = time.LoadLocation("Asia/Shanghai")
++	}
+ 	beijingNow := now.In(loc)
+ 
+ 	weekday := beijingNow.Weekday()
+@@ -771,6 +1032,21 @@ func handleTriggerAudit(w http.ResponseWriter, r *http.Request) {
+ 	w.Write([]byte(`{"status":"triggered"}`))
+ }
+ 
++func handleReloadConfig(w http.ResponseWriter, r *http.Request) {
++	if err := globalConfig.ReloadConfig(); err != nil {
++		w.WriteHeader(http.StatusInternalServerError)
++		json.NewEncoder(w).Encode(map[string]string{
++			"status": "error",
++			"error":  err.Error(),
++		})
++		return
++	}
++	json.NewEncoder(w).Encode(map[string]string{
++		"status":  "success",
++		"message": "Configuration reloaded",
++	})
++}
++
+ func handleLogin(w http.ResponseWriter, r *http.Request) {
+ 	tmpl, err := template.New("login").Parse(loginHTML)
+ 	if err != nil {

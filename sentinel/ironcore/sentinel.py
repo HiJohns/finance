@@ -1,0 +1,490 @@
+#!/usr/bin/env python3
+"""
+Sentinel Engine - AI-powered news monitoring and impact scoring
+哨兵引擎 - AI驱动的新闻监控与影响评分模块
+"""
+
+import os
+import sys
+import json
+import time
+import logging
+import sqlite3
+import yaml
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional, Tuple
+import requests
+from urllib.parse import quote
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+DB_PATH = os.path.join(os.path.dirname(__file__), 'ironcore.db')
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'config.yaml')
+
+
+class ConfigManager:
+    """Configuration manager for Sentinel"""
+    
+    def __init__(self, config_path=CONFIG_PATH):
+        self.config_path = config_path
+        self.config = None
+        self.load_config()
+    
+    def load_config(self):
+        """Load configuration from YAML"""
+        try:
+            with open(self.config_path, 'r', encoding='utf-8') as f:
+                self.config = yaml.safe_load(f)
+            logger.info(f"Sentinel config loaded from {self.config_path}")
+        except Exception as e:
+            logger.error(f"Failed to load config: {e}")
+            self.config = {}
+    
+    def get_sentinel_keywords(self) -> Dict[str, List[str]]:
+        """Get sentinel keywords by category"""
+        if not self.config:
+            return {}
+        return self.config.get('sentinel_keywords', {})
+    
+    def get_thresholds(self) -> Dict[str, float]:
+        """Get threshold values"""
+        if not self.config:
+            return {'impact_score_high': 0.8, 'impact_score_critical': 0.9}
+        return self.config.get('thresholds', {'impact_score_high': 0.8, 'impact_score_critical': 0.9})
+    
+    def get_api_config(self) -> Dict[str, str]:
+        """Get API configuration"""
+        if not self.config:
+            return {}
+        return self.config.get('api', {})
+
+
+class NewsAPIClient:
+    """Client for news APIs (GNews/NewsAPI)"""
+    
+    def __init__(self, provider: str = "gnews", api_key: Optional[str] = None):
+        self.provider = provider.lower()
+        self.api_key = api_key or os.environ.get('NEWS_API_KEY')
+        
+        if self.provider == "gnews":
+            self.base_url = "https://gnews.io/api/v4"
+        elif self.provider == "newsapi":
+            self.base_url = "https://newsapi.org/v2"
+        else:
+            raise ValueError(f"Unsupported news provider: {provider}")
+    
+    def search_news(self, keywords: List[str], days: int = 1) -> List[Dict]:
+        """Search news by keywords"""
+        if not self.api_key:
+            logger.error("NEWS_API_KEY not set")
+            return []
+        
+        # Join keywords with OR
+        query = " OR ".join([f'"{kw}"' for kw in keywords])
+        
+        # Calculate date range
+        from_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+        
+        try:
+            if self.provider == "gnews":
+                url = f"{self.base_url}/search"
+                params = {
+                    "q": query,
+                    "from": from_date,
+                    "lang": "en",
+                    "max": 20,
+                    "token": self.api_key
+                }
+            else:  # newsapi
+                url = f"{self.base_url}/everything"
+                params = {
+                    "q": query,
+                    "from": from_date,
+                    "sortBy": "publishedAt",
+                    "language": "en",
+                    "pageSize": 20,
+                    "apiKey": self.api_key
+                }
+            
+            response = requests.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            
+            if self.provider == "gnews":
+                articles = data.get('articles', [])
+            else:
+                articles = data.get('articles', [])
+            
+            logger.info(f"Fetched {len(articles)} news articles for query: {query[:50]}...")
+            return articles
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch news: {e}")
+            return []
+
+
+class LLMScorer:
+    """LLM-based impact scoring"""
+    
+    def __init__(self, provider: str = "openai", api_key: Optional[str] = None):
+        self.provider = provider.lower()
+        self.api_key = api_key or os.environ.get('LLM_API_KEY')
+        self.api_base = os.environ.get('LLM_API_BASE', 'https://api.openai.com/v1')
+    
+    def score_impact(self, title: str, keywords: List[str]) -> Tuple[float, str, str]:
+        """
+        Score the impact of a news title
+        Returns: (score, sentiment, logic_summary)
+        """
+        if not self.api_key:
+            logger.warning("LLM_API_KEY not set, using heuristic scoring")
+            return self._heuristic_score(title, keywords)
+        
+        try:
+            if self.provider == "openai":
+                return self._openai_score(title, keywords)
+            else:
+                return self._heuristic_score(title, keywords)
+        except Exception as e:
+            logger.error(f"LLM scoring failed: {e}")
+            return self._heuristic_score(title, keywords)
+    
+    def _openai_score(self, title: str, keywords: List[str]) -> Tuple[float, str, str]:
+        """Use OpenAI API for scoring"""
+        import openai
+        
+        client = openai.OpenAI(
+            api_key=self.api_key,
+            base_url=self.api_base
+        )
+        
+        prompt = f"""Analyze this financial news headline and rate its potential market impact:
+
+Headline: "{title}"
+Keywords of interest: {', '.join(keywords)}
+
+Provide your analysis in this exact format:
+Score: [0.0-1.0]
+Sentiment: [Positive/Negative/Neutral]
+Logic: [One sentence explaining the reasoning]
+
+Scoring guidelines:
+- 0.9-1.0: Critical market-moving event (war, major sanctions, central bank decisions)
+- 0.7-0.9: Significant impact likely (supply chain disruption, major policy change)
+- 0.4-0.7: Moderate impact (sector-specific news, minor geopolitical tensions)
+- 0.0-0.4: Low impact (routine updates, minor announcements)"""
+        
+        try:
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "You are a financial market analyst specializing in geopolitical risk assessment."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=150
+            )
+            
+            content = response.choices[0].message.content.strip()
+            
+            # Parse response
+            score = 0.5
+            sentiment = "Neutral"
+            logic = "Default assessment"
+            
+            # Robust parsing with validation
+            for line in content.split('\n'):
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                if line.lower().startswith('score:'):
+                    try:
+                        parts = line.split(':', 1)
+                        if len(parts) >= 2:
+                            score_str = parts[1].strip()
+                            # Extract numeric value (handle cases like "0.85" or "Score: 0.85")
+                            import re
+                            match = re.search(r'(\d+\.?\d*)', score_str)
+                            if match:
+                                score = float(match.group(1))
+                                score = max(0.0, min(1.0, score))
+                    except (ValueError, IndexError) as e:
+                        logger.warning(f"Failed to parse score from line '{line}': {e}")
+                        continue
+                        
+                elif line.lower().startswith('sentiment:'):
+                    try:
+                        parts = line.split(':', 1)
+                        if len(parts) >= 2:
+                            sentiment = parts[1].strip()
+                            # Normalize sentiment values
+                            sentiment_lower = sentiment.lower()
+                            if sentiment_lower in ['positive', 'pos', 'bullish']:
+                                sentiment = "Positive"
+                            elif sentiment_lower in ['negative', 'neg', 'bearish']:
+                                sentiment = "Negative"
+                            elif sentiment_lower in ['neutral', 'neutral']:
+                                sentiment = "Neutral"
+                    except IndexError:
+                        logger.warning(f"Failed to parse sentiment from line '{line}'")
+                        continue
+                        
+                elif line.lower().startswith('logic:'):
+                    try:
+                        parts = line.split(':', 1)
+                        if len(parts) >= 2:
+                            logic = parts[1].strip()
+                            if len(logic) > 200:
+                                logic = logic[:200] + "..."
+                    except IndexError:
+                        logger.warning(f"Failed to parse logic from line '{line}'")
+                        continue
+            
+            # Validate parsed values
+            if not (0.0 <= score <= 1.0):
+                logger.warning(f"Invalid score {score}, using default 0.5")
+                score = 0.5
+            
+            if sentiment not in ["Positive", "Negative", "Neutral"]:
+                logger.warning(f"Unexpected sentiment '{sentiment}', using Neutral")
+                sentiment = "Neutral"
+            
+            return score, sentiment, logic
+            
+        except Exception as e:
+            logger.error(f"OpenAI API error: {e}, falling back to heuristic scoring")
+            return self._heuristic_score(title, keywords)
+    
+    def _heuristic_score(self, title: str, keywords: List[str]) -> Tuple[float, str, str]:
+        """Fallback heuristic scoring"""
+        title_lower = title.lower()
+        
+        # Check for high-impact keywords
+        high_impact = ['war', 'sanctions', 'embargo', 'crisis', 'invasion', 'attack', 
+                       'shortage', 'supply chain', 'disruption', 'emergency', 'breaking']
+        medium_impact = ['increase', 'decrease', 'rises', 'falls', 'policy', 'regulation',
+                        'restrictions', 'tariffs', 'trade']
+        
+        score = 0.3  # Base score
+        
+        for word in high_impact:
+            if word in title_lower:
+                score = max(score, 0.8)
+                break
+        
+        for word in medium_impact:
+            if word in title_lower:
+                score = max(score, 0.5)
+        
+        # Check for keyword matches
+        for kw in keywords:
+            if kw.lower() in title_lower:
+                score = min(1.0, score + 0.1)
+        
+        # Determine sentiment
+        negative = ['fall', 'crash', 'drop', 'decline', 'crisis', 'war', 'shortage', 
+                    'disruption', 'sanctions', 'embargo']
+        positive = ['rise', 'gain', 'surge', 'boost', 'agreement', 'deal', 'growth']
+        
+        neg_count = sum(1 for w in negative if w in title_lower)
+        pos_count = sum(1 for w in positive if w in title_lower)
+        
+        if neg_count > pos_count:
+            sentiment = "Negative"
+        elif pos_count > neg_count:
+            sentiment = "Positive"
+        else:
+            sentiment = "Neutral"
+        
+        logic = f"Heuristic analysis: {neg_count} negative, {pos_count} positive indicators"
+        
+        return score, sentiment, logic
+
+
+class SentinelEngine:
+    """Main Sentinel engine for news monitoring"""
+    
+    def __init__(self):
+        self.config = ConfigManager()
+        
+        api_config = self.config.get_api_config()
+        news_provider = api_config.get('news_provider', 'gnews')
+        llm_provider = api_config.get('llm_provider', 'openai')
+        
+        self.news_client = NewsAPIClient(provider=news_provider)
+        self.scorer = LLMScorer(provider=llm_provider)
+        self.db_path = DB_PATH
+    
+    def init_db(self) -> sqlite3.Connection:
+        """Initialize database connection"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Ensure news_events table exists
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS news_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                symbol TEXT,
+                title TEXT NOT NULL,
+                impact_score REAL DEFAULT 0.0,
+                sentiment TEXT,
+                logic_summary TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_news_timestamp 
+            ON news_events(timestamp)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_news_score 
+            ON news_events(impact_score)
+        ''')
+        
+        conn.commit()
+        return conn
+    
+    def save_news_event(self, conn: sqlite3.Connection, event: Dict):
+        """Save a news event to database"""
+        cursor = conn.cursor()
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        cursor.execute('''
+            INSERT INTO news_events (timestamp, symbol, title, impact_score, sentiment, logic_summary)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (
+            timestamp,
+            event.get('symbol'),
+            event.get('title', ''),
+            event.get('impact_score', 0.0),
+            event.get('sentiment', 'Neutral'),
+            event.get('logic_summary', '')
+        ))
+        
+        conn.commit()
+    
+    def get_average_sentiment(self, conn: sqlite3.Connection, hours: int = 24) -> float:
+        """Get average impact score for recent news"""
+        cursor = conn.cursor()
+        since = (datetime.now() - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
+        
+        cursor.execute('''
+            SELECT AVG(impact_score) FROM news_events 
+            WHERE timestamp > ?
+        ''', (since,))
+        
+        result = cursor.fetchone()[0]
+        return result if result else 0.0
+    
+    def get_geopolitical_risk_level(self, conn: sqlite3.Connection) -> str:
+        """Determine geopolitical risk level based on recent news"""
+        avg_score = self.get_average_sentiment(conn, hours=6)
+        
+        thresholds = self.config.get_thresholds()
+        critical = thresholds.get('impact_score_critical', 0.9)
+        high = thresholds.get('impact_score_high', 0.8)
+        
+        if avg_score >= critical:
+            return "Red"
+        elif avg_score >= high:
+            return "Yellow"
+        else:
+            return "Green"
+    
+    def run_once(self):
+        """Run one iteration of news collection and scoring"""
+        logger.info("Starting Sentinel news collection...")
+        
+        conn = self.init_db()
+        
+        try:
+            keywords_dict = self.config.get_sentinel_keywords()
+            
+            all_articles = []
+            
+            # Collect news for each category
+            for category, keywords in keywords_dict.items():
+                if keywords:
+                    articles = self.news_client.search_news(keywords, days=1)
+                    for article in articles:
+                        article['category'] = category
+                        all_articles.append(article)
+                    
+                    logger.info(f"Category '{category}': {len(articles)} articles")
+                    time.sleep(1)  # Rate limiting
+            
+            # Score and save each article
+            high_impact_count = 0
+            for article in all_articles:
+                title = article.get('title', '')
+                category = article.get('category', 'general')
+                keywords = keywords_dict.get(category, [])
+                
+                score, sentiment, logic = self.scorer.score_impact(title, keywords)
+                
+                event = {
+                    'title': title,
+                    'impact_score': score,
+                    'sentiment': sentiment,
+                    'logic_summary': logic,
+                    'symbol': None  # Will be linked via keyword matching in future
+                }
+                
+                self.save_news_event(conn, event)
+                
+                if score >= 0.8:
+                    high_impact_count += 1
+                    logger.warning(f"HIGH IMPACT ({score:.2f}): {title[:80]}...")
+                else:
+                    logger.info(f"Scored ({score:.2f}): {title[:60]}...")
+            
+            # Report risk level
+            risk_level = self.get_geopolitical_risk_level(conn)
+            logger.info(f"Geopolitical Risk Level: {risk_level} (based on {len(all_articles)} articles)")
+            
+            return {
+                'articles_processed': len(all_articles),
+                'high_impact_count': high_impact_count,
+                'risk_level': risk_level
+            }
+            
+        finally:
+            conn.close()
+    
+    def run_continuous(self, interval_minutes: int = 30):
+        """Run continuously with specified interval"""
+        logger.info(f"Sentinel Engine started (interval: {interval_minutes} minutes)")
+        
+        while True:
+            try:
+                result = self.run_once()
+                logger.info(f"Sentinel cycle complete: {result}")
+            except Exception as e:
+                logger.error(f"Sentinel cycle error: {e}")
+            
+            time.sleep(interval_minutes * 60)
+
+
+def main():
+    """Main entry point"""
+    engine = SentinelEngine()
+    
+    # Check if run once or continuous
+    if len(sys.argv) > 1 and sys.argv[1] == '--once':
+        result = engine.run_once()
+        print(json.dumps(result, indent=2))
+    else:
+        interval = int(os.environ.get('SENTINEL_INTERVAL_MINUTES', 30))
+        engine.run_continuous(interval)
+
+
+if __name__ == '__main__':
+    main()

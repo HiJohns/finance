@@ -1,0 +1,1255 @@
+diff --git a/sentinel/ironcore/main.go b/sentinel/ironcore/main.go
+index 4d5e410..2bcb0f5 100644
+--- a/sentinel/ironcore/main.go
++++ b/sentinel/ironcore/main.go
+@@ -17,6 +17,7 @@ import (
+ 	"os"
+ 	"os/exec"
+ 	"strings"
++	"sync"
+ 	"time"
+ 
+ 	_ "github.com/mattn/go-sqlite3"
+@@ -24,6 +25,8 @@ import (
+ 	"github.com/piquette/finance-go/chart"
+ 	"github.com/piquette/finance-go/datetime"
+ 	"gonum.org/v1/gonum/stat"
++
++	yaml "gopkg.in/yaml.v3"
+ )
+ 
+ func init() {
+@@ -52,6 +55,55 @@ func (ct *customTransport) RoundTrip(req *http.Request) (*http.Response, error)
+ 	return ct.RoundTripper.RoundTrip(req)
+ }
+ 
++// Config represents the dynamic configuration
++type Config struct {
++	mu sync.RWMutex
++
++	Assets struct {
++		GlobalMacro    []AssetConfig `yaml:"global_macro"`
++		ChinaPowerGrid []AssetConfig `yaml:"china_power_grid"`
++		Benchmarks     []AssetConfig `yaml:"benchmarks"`
++	} `yaml:"assets"`
++
++	SentinelKeywords struct {
++		Geopolitical []string `yaml:"geopolitical"`
++		SupplyChain  []string `yaml:"supply_chain"`
++		Macro        []string `yaml:"macro"`
++	} `yaml:"sentinel_keywords"`
++
++	Thresholds struct {
++		SigmaLimit              float64 `yaml:"sigma_limit"`
++		ImpactScoreHigh         float64 `yaml:"impact_score_high"`
++		ImpactScoreCritical     float64 `yaml:"impact_score_critical"`
++		AuctionVolumeMultiplier float64 `yaml:"auction_volume_multiplier"`
++		CorrelationDivergence   float64 `yaml:"correlation_divergence"`
++	} `yaml:"thresholds"`
++
++	API struct {
++		NewsProvider         string `yaml:"news_provider"`
++		LLMProvider          string `yaml:"llm_provider"`
++		ConfigReloadEndpoint string `yaml:"config_reload_endpoint"`
++	} `yaml:"api"`
++
++	Runtime struct {
++		AuditIntervalMinutes int    `yaml:"audit_interval_minutes"`
++		AuctionTime          string `yaml:"auction_time"`
++		Timezone             string `yaml:"timezone"`
++	} `yaml:"runtime"`
++}
++
++// AssetConfig represents a single asset configuration
++type AssetConfig struct {
++	Symbol                string   `yaml:"symbol"`
++	Name                  string   `yaml:"name"`
++	Source                string   `yaml:"source"`
++	Tags                  []string `yaml:"tags,omitempty"`
++	IsBenchmark           bool     `yaml:"is_benchmark,omitempty"`
++	IsSentimentIndicator  bool     `yaml:"is_sentiment_indicator,omitempty"`
++	SensitivityMultiplier float64  `yaml:"sensitivity_multiplier,omitempty"`
++	AuctionMonitor        bool     `yaml:"auction_monitor,omitempty"`
++}
++
+ var (
+ 	smtpUser      string
+ 	smtpPass      string
+@@ -64,6 +116,161 @@ var (
+ 	version       string
+ )
+ 
++var (
++	globalConfig *Config
++	configPath   string = "config.yaml"
++)
++
++// GetAssets returns all configured assets safely
++func (c *Config) GetAssets() ([]AssetConfig, []AssetConfig, []AssetConfig) {
++	c.mu.RLock()
++	defer c.mu.RUnlock()
++	return c.Assets.GlobalMacro, c.Assets.ChinaPowerGrid, c.Assets.Benchmarks
++}
++
++// GetAssetBySymbol returns asset config by symbol
++func (c *Config) GetAssetBySymbol(symbol string) (AssetConfig, bool) {
++	c.mu.RLock()
++	defer c.mu.RUnlock()
++
++	allAssets := append(c.Assets.GlobalMacro, c.Assets.ChinaPowerGrid...)
++	allAssets = append(allAssets, c.Assets.Benchmarks...)
++
++	for _, asset := range allAssets {
++		if asset.Symbol == symbol {
++			return asset, true
++		}
++	}
++	return AssetConfig{}, false
++}
++
++// GetSentinelKeywords returns all sentinel keywords
++func (c *Config) GetSentinelKeywords() ([]string, []string, []string) {
++	c.mu.RLock()
++	defer c.mu.RUnlock()
++	return c.SentinelKeywords.Geopolitical, c.SentinelKeywords.SupplyChain, c.SentinelKeywords.Macro
++}
++
++// GetThresholds returns threshold values
++func (c *Config) GetThresholds() (float64, float64, float64) {
++	c.mu.RLock()
++	defer c.mu.RUnlock()
++	return c.Thresholds.SigmaLimit, c.Thresholds.ImpactScoreHigh, c.Thresholds.ImpactScoreCritical
++}
++
++// ReloadConfig reloads configuration from file
++func (c *Config) ReloadConfig() error {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++
++	data, err := os.ReadFile(configPath)
++	if err != nil {
++		return fmt.Errorf("failed to read config file: %w", err)
++	}
++
++	newConfig := &Config{}
++	if err := yaml.Unmarshal(data, newConfig); err != nil {
++		return fmt.Errorf("failed to parse config file: %w", err)
++	}
++
++	*c = *newConfig
++	log.Println("✅ Configuration reloaded successfully")
++	return nil
++}
++
++// LoadConfig loads configuration from file
++func LoadConfig(path string) (*Config, error) {
++	data, err := os.ReadFile(path)
++	if err != nil {
++		return nil, fmt.Errorf("failed to read config file: %w", err)
++	}
++
++	config := &Config{}
++	if err := yaml.Unmarshal(data, config); err != nil {
++		return nil, fmt.Errorf("failed to parse config file: %w", err)
++	}
++
++	// Set defaults if not specified
++	if config.Thresholds.SigmaLimit == 0 {
++		config.Thresholds.SigmaLimit = 3.0
++	}
++	if config.Thresholds.ImpactScoreHigh == 0 {
++		config.Thresholds.ImpactScoreHigh = 0.8
++	}
++	if config.Thresholds.ImpactScoreCritical == 0 {
++		config.Thresholds.ImpactScoreCritical = 0.9
++	}
++	if config.Thresholds.AuctionVolumeMultiplier == 0 {
++		config.Thresholds.AuctionVolumeMultiplier = 2.0
++	}
++	if config.Runtime.AuditIntervalMinutes == 0 {
++		config.Runtime.AuditIntervalMinutes = 10
++	}
++	if config.Runtime.Timezone == "" {
++		config.Runtime.Timezone = "Asia/Shanghai"
++	}
++
++	return config, nil
++}
++
++// GetAllAssetSymbols returns all asset symbols as string slices
++func (c *Config) GetAllAssetSymbols() ([]string, []string) {
++	c.mu.RLock()
++	defer c.mu.RUnlock()
++
++	globalSymbols := make([]string, len(c.Assets.GlobalMacro))
++	for i, asset := range c.Assets.GlobalMacro {
++		globalSymbols[i] = asset.Symbol
++	}
++
++	chinaSymbols := make([]string, len(c.Assets.ChinaPowerGrid))
++	for i, asset := range c.Assets.ChinaPowerGrid {
++		chinaSymbols[i] = asset.Symbol
++	}
++
++	return globalSymbols, chinaSymbols
++}
++
++// GetBenchmarkSymbol returns the benchmark symbol (HS300)
++func (c *Config) GetBenchmarkSymbol() string {
++	c.mu.RLock()
++	defer c.mu.RUnlock()
++
++	for _, asset := range c.Assets.Benchmarks {
++		if asset.Symbol == "000300.SS" {
++			return asset.Symbol
++		}
++	}
++	return "000300.SS" // fallback
++}
++
++// GetSentimentIndicator returns VIX symbol
++func (c *Config) GetSentimentIndicator() string {
++	c.mu.RLock()
++	defer c.mu.RUnlock()
++
++	for _, asset := range c.Assets.GlobalMacro {
++		if asset.IsSentimentIndicator {
++			return asset.Symbol
++		}
++	}
++	return "^VIX" // fallback
++}
++
++// GetAuctionMonitorAssets returns assets marked for auction monitoring
++func (c *Config) GetAuctionMonitorAssets() []AssetConfig {
++	c.mu.RLock()
++	defer c.mu.RUnlock()
++
++	var auctionAssets []AssetConfig
++	for _, asset := range c.Assets.ChinaPowerGrid {
++		if asset.AuctionMonitor {
++			auctionAssets = append(auctionAssets, asset)
++		}
++	}
++	return auctionAssets
++}
++
+ type PlotData struct {
+ 	Assets      []string             `json:"assets"`
+ 	ChinaAssets []string             `json:"china_assets"`
+@@ -82,6 +289,7 @@ type AssetStatus struct {
+ 	CurrentPrice      float64 `json:"current_price"`
+ 	MarketPrice       float64 `json:"market_price"`
+ 	Volume            float64 `json:"volume"`
++	TurnoverRate      float64 `json:"turnover_rate"`
+ 	LatestReturn      float64 `json:"latest_return"`
+ 	Corr6m            float64 `json:"corr_6m"`
+ 	Corr30d           float64 `json:"corr_30d"`
+@@ -92,6 +300,10 @@ type AssetStatus struct {
+ 	HS300Corr         float64 `json:"hs300_corr"`
+ 	CorrelationStatus string  `json:"correlation_status"`
+ 	MarketStatus      string  `json:"market_status"`
++	SentimentScore    float64 `json:"sentiment_score"`
++	LatestNews        string  `json:"latest_news"`
++	ImpactScore       float64 `json:"impact_score"`
++	TacticalAdvice    string  `json:"tactical_advice"`
+ }
+ 
+ type ResonanceStatus struct {
+@@ -103,14 +315,19 @@ type ResonanceStatus struct {
+ }
+ 
+ type AuditStatus struct {
+-	Timestamp        time.Time          `json:"timestamp"`
+-	Assets           []AssetStatus      `json:"assets"`
+-	VixDxyCorr       float64            `json:"vix_dxy_corr"`
+-	VixWarning       bool               `json:"vix_warning"`
+-	SilentPeriod     bool               `json:"silent_period"`
+-	LastAlertTime    time.Time          `json:"last_alert_time"`
+-	CorrAcceleration map[string]float64 `json:"corr_acceleration"`
+-	Resonance        ResonanceStatus    `json:"resonance"`
++	Timestamp           time.Time          `json:"timestamp"`
++	Assets              []AssetStatus      `json:"assets"`
++	VixDxyCorr          float64            `json:"vix_dxy_corr"`
++	VixWarning          bool               `json:"vix_warning"`
++	SilentPeriod        bool               `json:"silent_period"`
++	LastAlertTime       time.Time          `json:"last_alert_time"`
++	CorrAcceleration    map[string]float64 `json:"corr_acceleration"`
++	Resonance           ResonanceStatus    `json:"resonance"`
++	GeopoliticalRisk    string             `json:"geopolitical_risk"`
++	CapitalAlert        bool               `json:"capital_alert"`
++	CapitalAlertMessage string             `json:"capital_alert_message"`
++	CapitalAlertTime    time.Time          `json:"capital_alert_time"`
++	TacticalAdvice      string             `json:"tactical_advice"`
+ }
+ 
+ var (
+@@ -119,6 +336,255 @@ var (
+ 	db           *sql.DB
+ )
+ 
++func initDB(dbPath string) (*sql.DB, error) {
++	db, err := sql.Open("sqlite3", dbPath)
++	if err != nil {
++		return nil, fmt.Errorf("failed to open database: %w", err)
++	}
++
++	// Create market_data table with turnover_rate
++	_, err = db.Exec(`
++		CREATE TABLE IF NOT EXISTS market_data (
++			id INTEGER PRIMARY KEY AUTOINCREMENT,
++			timestamp TEXT NOT NULL,
++			symbol TEXT NOT NULL,
++			price REAL,
++			volume REAL,
++			turnover_rate REAL,
++			created_at TEXT DEFAULT CURRENT_TIMESTAMP
++		)
++	`)
++	if err != nil {
++		return nil, fmt.Errorf("failed to create market_data table: %w", err)
++	}
++
++	// Create index
++	_, err = db.Exec(`
++		CREATE INDEX IF NOT EXISTS idx_symbol_timestamp 
++		ON market_data(symbol, timestamp)
++	`)
++	if err != nil {
++		return nil, fmt.Errorf("failed to create index: %w", err)
++	}
++
++	// Create news_events table
++	_, err = db.Exec(`
++		CREATE TABLE IF NOT EXISTS news_events (
++			id INTEGER PRIMARY KEY AUTOINCREMENT,
++			timestamp TEXT NOT NULL,
++			symbol TEXT,
++			title TEXT NOT NULL,
++			impact_score REAL DEFAULT 0.0,
++			sentiment TEXT,
++			logic_summary TEXT,
++			created_at TEXT DEFAULT CURRENT_TIMESTAMP
++		)
++	`)
++	if err != nil {
++		return nil, fmt.Errorf("failed to create news_events table: %w", err)
++	}
++
++	// Create index for news_events
++	_, err = db.Exec(`
++		CREATE INDEX IF NOT EXISTS idx_news_timestamp 
++		ON news_events(timestamp)
++	`)
++	if err != nil {
++		return nil, fmt.Errorf("failed to create news index: %w", err)
++	}
++
++	_, err = db.Exec(`
++		CREATE INDEX IF NOT EXISTS idx_news_symbol 
++		ON news_events(symbol)
++	`)
++	if err != nil {
++		return nil, fmt.Errorf("failed to create news symbol index: %w", err)
++	}
++
++	return db, nil
++}
++
++func getLatestSentimentForSymbol(symbol string) (float64, string, error) {
++	if db == nil {
++		return 0, "", fmt.Errorf("database not initialized")
++	}
++
++	var score float64
++	var title string
++	err := db.QueryRow(`
++		SELECT impact_score, title FROM news_events 
++		WHERE symbol = ? OR symbol IS NULL 
++		ORDER BY timestamp DESC LIMIT 1
++	`, symbol).Scan(&score, &title)
++
++	if err == sql.ErrNoRows {
++		return 0, "", nil
++	}
++	if err != nil {
++		return 0, "", err
++	}
++
++	return score, title, nil
++}
++
++func getGeopoliticalRiskLevel() string {
++	if db == nil {
++		return "Green"
++	}
++
++	since := time.Now().Add(-6 * time.Hour).Format("2006-01-02 15:04:05")
++
++	var avgScore float64
++	err := db.QueryRow(`
++		SELECT AVG(impact_score) FROM news_events 
++		WHERE timestamp > ?
++	`, since).Scan(&avgScore)
++
++	if err != nil || avgScore == 0 {
++		return "Green"
++	}
++
++	if avgScore >= 0.9 {
++		return "Red"
++	} else if avgScore >= 0.8 {
++		return "Yellow"
++	}
++	return "Green"
++}
++
++func getRecentHighImpactNews() []map[string]interface{} {
++	if db == nil {
++		return nil
++	}
++
++	since := time.Now().Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
++
++	rows, err := db.Query(`
++		SELECT title, impact_score, sentiment, timestamp 
++		FROM news_events 
++		WHERE timestamp > ? AND impact_score >= 0.8
++		ORDER BY timestamp DESC LIMIT 10
++	`, since)
++
++	if err != nil {
++		return nil
++	}
++	defer rows.Close()
++
++	var events []map[string]interface{}
++	for rows.Next() {
++		var title, sentiment, timestamp string
++		var score float64
++		if err := rows.Scan(&title, &score, &sentiment, &timestamp); err == nil {
++			events = append(events, map[string]interface{}{
++				"title":     title,
++				"score":     score,
++				"sentiment": sentiment,
++				"time":      timestamp,
++			})
++		}
++	}
++
++	return events
++}
++
++func generateTacticalAdvice(assets []AssetStatus, resonance ResonanceStatus, geoRisk string) string {
++	// Find critical assets with high impact scores
++	var criticalAssets []AssetStatus
++	var highImpactAssets []AssetStatus
++	var gridHardAssets []AssetStatus
++	var aidcAssets []AssetStatus
++
++	for _, a := range assets {
++		if a.IsCritical {
++			criticalAssets = append(criticalAssets, a)
++		}
++		if a.ImpactScore >= 0.8 {
++			highImpactAssets = append(highImpactAssets, a)
++		}
++		if strings.Contains(a.Tags, "Grid-Hard") {
++			gridHardAssets = append(gridHardAssets, a)
++		}
++		if strings.Contains(a.Tags, "AIDC-Leader") {
++			aidcAssets = append(aidcAssets, a)
++		}
++	}
++
++	// Generate advice based on conditions
++	var adviceParts []string
++
++	// Check for physical infrastructure resonance
++	if resonance.IsActive && len(gridHardAssets) > 0 {
++		adviceParts = append(adviceParts, "检测到物理基建板块共振信号")
++	}
++
++	// Check for high geopolitical risk with sector impact
++	if geoRisk == "Red" && len(highImpactAssets) > 0 {
++		adviceParts = append(adviceParts, "地缘政治风险处于危机级别")
++	} else if geoRisk == "Yellow" {
++		adviceParts = append(adviceParts, "地缘政治风险处于紧张状态")
++	}
++
++	// Check for 3-sigma anomalies
++	if len(criticalAssets) > 0 {
++		symbols := []string{}
++		for _, a := range criticalAssets {
++			symbols = append(symbols, a.Symbol)
++		}
++		adviceParts = append(adviceParts, fmt.Sprintf("%d 个标的触发3-Sigma异动", len(criticalAssets)))
++	}
++
++	// Generate final recommendation
++	if len(adviceParts) == 0 {
++		return "市场处于正常波动区间，建议维持现有仓位观察。"
++	}
++
++	advice := strings.Join(adviceParts, "，") + "。"
++
++	// Add specific recommendation
++	if resonance.IsActive && geoRisk == "Red" && len(gridHardAssets) > 0 {
++		advice += " 建议关注电力枢纽标的配置机会，如："
++		for _, a := range gridHardAssets[:min(3, len(gridHardAssets))] {
++			advice += fmt.Sprintf(" %s", a.Symbol)
++		}
++		advice += "。"
++	} else if len(criticalAssets) > 0 && geoRisk == "Green" {
++		advice += " 异动与地缘因素无关，建议谨慎追高。"
++	}
++
++	return advice
++}
++
++func min(a, b int) int {
++	if a < b {
++		return a
++	}
++	return b
++}
++
++func getLatestVolumeAndTurnover(symbol string) (float64, float64) {
++	if db == nil {
++		return 0, 0
++	}
++	var volume, turnover float64
++	normalizedSymbol := symbol
++	if strings.HasSuffix(symbol, ".SS") {
++		normalizedSymbol = strings.TrimSuffix(symbol, ".SS")
++	} else if strings.HasSuffix(symbol, ".SH") {
++		normalizedSymbol = strings.TrimSuffix(symbol, ".SH")
++	} else if strings.HasSuffix(symbol, ".SZ") {
++		normalizedSymbol = strings.TrimSuffix(symbol, ".SZ")
++	}
++	err := db.QueryRow(
++		"SELECT volume, turnover_rate FROM market_data WHERE symbol LIKE ? ORDER BY timestamp DESC LIMIT 1",
++		normalizedSymbol+"%",
++	).Scan(&volume, &turnover)
++	if err != nil {
++		return 0, 0
++	}
++	return volume, turnover
++}
++
+ var dashboardHTML = `
+ <!DOCTYPE html>
+ <html>
+@@ -143,6 +609,7 @@ var dashboardHTML = `
+         .warning { background: #53354a; }
+         .critical { background: #903749; animation: pulse 1s infinite; }
+         .resonance-active { background: linear-gradient(90deg, #11998e, #38ef7d); animation: pulse 1s infinite; }
++        .capital-alert { background: linear-gradient(90deg, #ff416c, #ff4b2b); animation: pulse 0.5s infinite; }
+         @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
+         table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+         th, td { padding: 12px; text-align: left; border-bottom: 1px solid #333; }
+@@ -156,6 +623,15 @@ var dashboardHTML = `
+         .timestamp { color: #888; font-size: 0.9em; }
+         .tag { display: inline-block; background: #2d3748; padding: 2px 8px; border-radius: 4px; font-size: 12px; margin-left: 5px; }
+         .market-price { color: #f6e05e; font-weight: bold; }
++        .risk-light { display: inline-block; width: 20px; height: 20px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
++        .risk-green { background: #28a745; box-shadow: 0 0 10px #28a745; }
++        .risk-yellow { background: #ffc107; box-shadow: 0 0 10px #ffc107; }
++        .risk-red { background: #dc3545; box-shadow: 0 0 10px #dc3545; animation: blink 1s infinite; }
++        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
++        .tactical-advice { background: linear-gradient(135deg, #1e3c72, #2a5298); padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #00d4ff; }
++        .advice-title { color: #00d4ff; font-weight: bold; margin-bottom: 8px; }
++        .news-badge { display: inline-block; background: #ff4757; color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; margin-left: 5px; }
++        .impact-high { background: #ff4757; }
+     </style>
+     <script>
+         function syncNow() {
+@@ -164,6 +640,11 @@ var dashboardHTML = `
+                 location.reload();
+             });
+         }
++        function getRiskClass(level) {
++            if (level === 'Red') return 'risk-red';
++            if (level === 'Yellow') return 'risk-yellow';
++            return 'risk-green';
++        }
+     </script>
+ </head>
+ <body>
+@@ -174,6 +655,13 @@ var dashboardHTML = `
+     <div style="text-align: right; margin-bottom: 10px;">
+         <a href="/logout" style="color: #888; text-decoration: none;">[退出登录]</a>
+     </div>
++
++    {{if .CapitalAlert}}
++    <div class="status-bar capital-alert">
++        <strong>🔥 换血资金进场!</strong> {{.CapitalAlertMessage}} |
++        <span class="timestamp">检测时间: {{.CapitalAlertTime.Format "15:04:05"}}</span>
++    </div>
++    {{end}}
+     
+     {{if .Resonance.IsActive}}
+     <div class="status-bar resonance-active">
+@@ -184,16 +672,32 @@ var dashboardHTML = `
+     </div>
+     {{else}}
+     <div class="status-bar {{if .SilentPeriod}}warning{{else}}normal{{end}}">
+-        <strong>状态:</strong> {{if .SilentPeriod}}🔇 静默期 (开盘前30分钟){{else}}🟢 监控中{{end}} | 
++        <strong>状态:</strong> {{if .SilentPeriod}}🔇 静默期 (周末/闭市){{else}}🟢 监控中{{end}} | 
+         <strong>VIX-DXY相关:</strong> {{printf "%.4f" .VixDxyCorr}} {{if .VixWarning}}<span class="alert">⚠️ 共振预警</span>{{end}} |
+         <span class="timestamp">更新: {{.Timestamp.Format "2006-01-02 15:04:05"}}</span>
+     </div>
+     {{end}}
+ 
++    <div class="status-bar normal">
++        <strong>🌍 地缘政治风险:</strong>
++        <span class="risk-light {{if eq .GeopoliticalRisk "Red"}}risk-red{{else if eq .GeopoliticalRisk "Yellow"}}risk-yellow{{else}}risk-green{{end}}"></span>
++        <span style="font-weight: bold;">
++            {{if eq .GeopoliticalRisk "Red"}}Red (Crisis){{else if eq .GeopoliticalRisk "Yellow"}}Yellow (Tension){{else}}Green (Calm){{end}}
++        </span>
++        <span style="margin-left: 20px; color: #888;">基于过去6小时新闻分析</span>
++    </div>
++
++    {{if .TacticalAdvice}}
++    <div class="tactical-advice">
++        <div class="advice-title">🎯 战术建议 (Tactical Advice)</div>
++        <div>{{.TacticalAdvice}}</div>
++    </div>
++    {{end}}
++
+     <div class="section">
+         <h2>📊 全球宏观标的</h2>
+         <table>
+-            <tr><th>标的</th><th>标签</th><th>最新价</th><th>Market Price</th><th>收益率</th><th>6月相关</th><th>30日相关</th><th>3-Sigma</th><th>状态</th></tr>
++            <tr><th>标的</th><th>标签</th><th>最新价</th><th>Market Price</th><th>收益率</th><th>6月相关</th><th>30日相关</th><th>3-Sigma</th><th>新闻评分</th><th>状态</th></tr>
+             {{range .Assets}}
+             {{if ne .CorrelationStatus "china"}}
+             <tr {{if .IsCritical}}class="critical-row"{{end}}>
+@@ -205,6 +709,7 @@ var dashboardHTML = `
+                 <td {{if lt .Corr6m 0.1}}class="cyan"{{end}}>{{printf "%.4f" .Corr6m}}</td>
+                 <td {{if lt .Corr30d 0.1}}class="cyan"{{end}}>{{printf "%.4f" .Corr30d}}</td>
+                 <td>μ={{printf "%.4f" .Mean}}, σ={{printf "%.4f" .Sigma}}</td>
++                <td>{{if ge .ImpactScore 0.8}}<span class="news-badge impact-high">{{printf "%.2f" .ImpactScore}}</span>{{else}}{{printf "%.2f" .ImpactScore}}{{end}}</td>
+                 <td>{{if .IsCritical}}<span class="alert">🚨 {{.AlertMessage}}</span>{{else}}<span class="safe">🟢 正常</span>{{end}}</td>
+             </tr>
+             {{end}}
+@@ -215,7 +720,7 @@ var dashboardHTML = `
+     <div class="section">
+         <h2>🇨🇳 中国电力枢纽标的</h2>
+         <table>
+-            <tr><th>标的</th><th>标签</th><th>最新价</th><th>Market Price</th><th>收益率</th><th>vs DXY</th><th>vs 沪深300</th><th>大盘关联</th><th>状态</th></tr>
++            <tr><th>标的</th><th>标签</th><th>最新价</th><th>Market Price</th><th>收益率</th><th>换手率</th><th>vs DXY</th><th>vs 沪深300</th><th>新闻评分</th><th>状态</th></tr>
+             {{range .Assets}}
+             {{if eq .CorrelationStatus "china"}}
+             <tr {{if .IsCritical}}class="critical-row"{{end}}>
+@@ -224,9 +729,10 @@ var dashboardHTML = `
+                 <td>{{printf "%.2f" .CurrentPrice}}</td>
+                 <td><span class="market-price">{{printf "%.2f" .MarketPrice}}</span></td>
+                 <td>{{printf "%.2f" .LatestReturn}}%</td>
++                <td>{{printf "%.2f" .TurnoverRate}}%</td>
+                 <td {{if lt .Corr30d 0.1}}class="cyan"{{end}}>{{printf "%.4f" .Corr30d}}</td>
+                 <td {{if lt .HS300Corr 0.1}}class="cyan"{{end}}>{{printf "%.4f" .HS300Corr}}</td>
+-                <td>{{.MarketStatus}}</td>
++                <td>{{if ge .ImpactScore 0.8}}<span class="news-badge impact-high">{{printf "%.2f" .ImpactScore}}</span>{{else}}{{printf "%.2f" .ImpactScore}}{{end}}</td>
+                 <td>{{if .IsCritical}}<span class="alert">🚨 {{.AlertMessage}}</span>{{else}}<span class="safe">🟢 正常</span>{{end}}</td>
+             </tr>
+             {{end}}
+@@ -286,6 +792,7 @@ func main() {
+ 	_ = flag.String("mode", "prod", "运行模式: prod(生产) 或 test(测试)")
+ 	flag.StringVar(&dbPath, "db", "ironcore.db", "SQLite数据库路径")
+ 	flag.StringVar(&httpPort, "port", "9070", "HTTP服务端口")
++	flag.StringVar(&configPath, "config", "config.yaml", "配置文件路径")
+ 	flag.Parse()
+ 
+ 	if *versionFlag {
+@@ -293,9 +800,16 @@ func main() {
+ 		os.Exit(0)
+ 	}
+ 
++	// Load configuration
++	var err error
++	globalConfig, err = LoadConfig(configPath)
++	if err != nil {
++		log.Fatalf("Failed to load config: %v", err)
++	}
++	log.Printf("✅ Configuration loaded from %s", configPath)
++
+ 	var endTime time.Time
+ 	if *dateFlag != "" {
+-		var err error
+ 		endTime, err = time.Parse("2006-01-02", *dateFlag)
+ 		if err != nil {
+ 			log.Printf("日期解析失败，使用当前时间: %v", err)
+@@ -305,10 +819,9 @@ func main() {
+ 		endTime = time.Now()
+ 	}
+ 
+-	var err error
+-	db, err = sql.Open("sqlite3", dbPath)
++	db, err = initDB(dbPath)
+ 	if err != nil {
+-		log.Printf("数据库连接失败: %v", err)
++		log.Printf("数据库初始化失败: %v", err)
+ 	} else {
+ 		defer db.Close()
+ 	}
+@@ -328,6 +841,7 @@ func main() {
+ 	http.HandleFunc("/", authMiddleware(handleDashboard))
+ 	http.HandleFunc("/api/status", authMiddleware(handleAPIStatus))
+ 	http.HandleFunc("/api/audit", authMiddleware(handleTriggerAudit))
++	http.HandleFunc("/api/reload-config", authMiddleware(handleReloadConfig))
+ 
+ 	addr := ":" + httpPort
+ 	log.Printf("🚀 IronCore 服务启动: http://localhost%s", addr)
+@@ -335,7 +849,12 @@ func main() {
+ }
+ 
+ func runAuditLoop(baseTime time.Time) {
+-	ticker := time.NewTicker(10 * time.Minute)
++	interval := time.Duration(globalConfig.Runtime.AuditIntervalMinutes) * time.Minute
++	if interval == 0 {
++		interval = 10 * time.Minute
++	}
++
++	ticker := time.NewTicker(interval)
+ 	defer ticker.Stop()
+ 
+ 	for {
+@@ -351,12 +870,49 @@ func runAuditLoop(baseTime time.Time) {
+ func performAudit(endTime time.Time) {
+ 	log.Println("🔄 执行审计...")
+ 
+-	assets := []string{"SRVR", "SLV", "USO", "GLD", "IWY"}
+-	chinaPowerAssets := []string{"600406.SS", "002028.SZ", "002270.SZ", "688676.SS", "159326.SZ"}
+-	hs300 := "000300.SS"
+-	dxy := "DX-Y.NYB"
++	// Check auction time and trigger alerts if needed
++	if isAuctionSnapshotTime() {
++		log.Println("📊 集合竞价时段，检查成交量...")
++		auctionAssets := globalConfig.GetAuctionMonitorAssets()
++		for _, asset := range auctionAssets {
++			isAnomaly, volume, ratio := checkAuctionVolumeAlert(asset)
++			if isAnomaly {
++				triggerCapitalAlert(asset, volume, ratio)
++			}
++		}
++	}
++
++	// Get assets from config
++	globalAssets, chinaAssets, benchmarks := globalConfig.GetAssets()
+ 
+-	dxyReturns, dxyDates, _ := getReturnsWithRetry(dxy, endTime)
++	// Find DXY benchmark
++	var dxySymbol string
++	for _, asset := range globalAssets {
++		if asset.Symbol == "DX-Y.NYB" {
++			dxySymbol = asset.Symbol
++			break
++		}
++	}
++	if dxySymbol == "" {
++		dxySymbol = "DX-Y.NYB"
++	}
++
++	// Find HS300
++	var hs300 string
++	for _, asset := range benchmarks {
++		if asset.Symbol == "000300.SS" {
++			hs300 = asset.Symbol
++			break
++		}
++	}
++	if hs300 == "" {
++		hs300 = "000300.SS"
++	}
++
++	// Get VIX symbol
++	vixSymbol := globalConfig.GetSentimentIndicator()
++
++	dxyReturns, dxyDates, _ := getReturnsWithRetry(dxySymbol, endTime)
+ 	dxyMap := make(map[string]float64)
+ 	if dxyReturns != nil && dxyDates != nil {
+ 		for i, date := range dxyDates {
+@@ -372,7 +928,7 @@ func performAudit(endTime time.Time) {
+ 		}
+ 	}
+ 
+-	vixReturns, vixDates, _ := getReturnsWithRetry("^VIX", endTime)
++	vixReturns, vixDates, _ := getReturnsWithRetry(vixSymbol, endTime)
+ 	vixDxyCorr := 0.0
+ 	vixWarning := false
+ 	if vixReturns != nil && vixDates != nil && dxyReturns != nil && dxyDates != nil {
+@@ -404,15 +960,17 @@ func performAudit(endTime time.Time) {
+ 
+ 	var assetStatuses []AssetStatus
+ 
+-	for _, symbol := range assets {
+-		status := calculateAssetStatus(symbol, dxyMap, endTime, "global")
++	// Process global assets
++	for _, asset := range globalAssets {
++		status := calculateAssetStatusWithConfig(asset, dxyMap, endTime, "global")
+ 		assetStatuses = append(assetStatuses, status)
+ 	}
+ 
+-	for _, symbol := range chinaPowerAssets {
+-		status := calculateAssetStatus(symbol, dxyMap, endTime, "china")
++	// Process China power grid assets
++	for _, asset := range chinaAssets {
++		status := calculateAssetStatusWithConfig(asset, dxyMap, endTime, "china")
+ 		if len(hs300Map) > 0 {
+-			status.HS300Corr = calculateHS300Corr(symbol, hs300Map, endTime)
++			status.HS300Corr = calculateHS300Corr(asset.Symbol, hs300Map, endTime)
+ 			if status.HS300Corr > 0.6 {
+ 				status.MarketStatus = "跟随大盘内卷"
+ 			} else if status.HS300Corr < 0.3 {
+@@ -427,6 +985,10 @@ func performAudit(endTime time.Time) {
+ 	acceleration := calculateCorrAcceleration(assetStatuses)
+ 	resonance := calculateResonance(assetStatuses)
+ 
++	// Get geopolitical risk level and generate tactical advice
++	geoRisk := getGeopoliticalRiskLevel()
++	tacticalAdvice := generateTacticalAdvice(assetStatuses, resonance, geoRisk)
++
+ 	globalStatus = AuditStatus{
+ 		Timestamp:        time.Now(),
+ 		Assets:           assetStatuses,
+@@ -435,13 +997,25 @@ func performAudit(endTime time.Time) {
+ 		SilentPeriod:     silentPeriod,
+ 		CorrAcceleration: acceleration,
+ 		Resonance:        resonance,
++		GeopoliticalRisk: geoRisk,
++		TacticalAdvice:   tacticalAdvice,
+ 	}
+ 
+ 	checkAndSendAlert(vixWarning, assetStatuses)
+ 
++	// Build plot data
++	plotAssets := make([]string, len(globalAssets))
++	for i, a := range globalAssets {
++		plotAssets[i] = a.Symbol
++	}
++	plotChinaAssets := make([]string, len(chinaAssets))
++	for i, a := range chinaAssets {
++		plotChinaAssets[i] = a.Symbol
++	}
++
+ 	plotData := PlotData{
+-		Assets:      assets,
+-		ChinaAssets: chinaPowerAssets,
++		Assets:      plotAssets,
++		ChinaAssets: plotChinaAssets,
+ 		Corrs6m:     make(map[string][]float64),
+ 		Corrs30:     make(map[string][]float64),
+ 		ChinaCorr6m: make(map[string][]float64),
+@@ -488,42 +1062,25 @@ func getLatestMarketPrice(symbol string) float64 {
+ 	return price
+ }
+ 
+-func calculateAssetStatus(symbol string, dxyMap map[string]float64, endTime time.Time, assetType string) AssetStatus {
+-	if strings.HasSuffix(symbol, ".SS") || strings.HasSuffix(symbol, ".SZ") {
++func calculateAssetStatusWithConfig(asset AssetConfig, dxyMap map[string]float64, endTime time.Time, assetType string) AssetStatus {
++	if strings.HasSuffix(asset.Symbol, ".SS") || strings.HasSuffix(asset.Symbol, ".SZ") {
+ 		assetType = "china"
+ 	} else {
+ 		assetType = "global"
+ 	}
++
+ 	status := AssetStatus{
+-		Symbol:            symbol,
++		Symbol:            asset.Symbol,
++		Name:              asset.Name,
+ 		CorrelationStatus: assetType,
+ 	}
+ 
+-	nameMap := map[string]string{
+-		"SRVR":      "全球数据中心REIT",
+-		"SLV":       "白银ETF",
+-		"USO":       "原油ETF",
+-		"GLD":       "黄金ETF",
+-		"IWY":       "纳斯达克科技ETF",
+-		"600406.SS": "国电南瑞",
+-		"002028.SZ": "思源电气",
+-		"002270.SZ": "华明装备",
+-		"688676.SS": "金盘科技",
+-		"159326.SZ": "电网设备ETF",
++	// Format tags
++	if len(asset.Tags) > 0 {
++		status.Tags = strings.Join(asset.Tags, " ")
+ 	}
+ 
+-	tagMap := map[string]string{
+-		"688676.SS": "🚀 AIDC-Leader",
+-		"002028.SZ": "💎 Grid-Hard",
+-		"002270.SZ": "💎 Grid-Hard",
+-		"159326.SZ": "📊 Sector-Beta",
+-		"SRVR":      "☁️ US-Compute",
+-	}
+-
+-	status.Name = nameMap[symbol]
+-	status.Tags = tagMap[symbol]
+-
+-	returns, dates, _ := getReturnsWithRetry(symbol, endTime)
++	returns, dates, _ := getReturnsWithRetry(asset.Symbol, endTime)
+ 	if returns == nil || len(returns) == 0 {
+ 		return status
+ 	}
+@@ -531,7 +1088,16 @@ func calculateAssetStatus(symbol string, dxyMap map[string]float64, endTime time
+ 	if len(returns) > 0 {
+ 		status.CurrentPrice = 100 * (1 + returns[len(returns)-1])
+ 		status.LatestReturn = returns[len(returns)-1] * 100
+-		status.MarketPrice = getLatestMarketPrice(symbol)
++		status.MarketPrice = getLatestMarketPrice(asset.Symbol)
++		status.Volume, status.TurnoverRate = getLatestVolumeAndTurnover(asset.Symbol)
++	}
++
++	// Get sentiment data from news_events
++	impactScore, latestNews, _ := getLatestSentimentForSymbol(asset.Symbol)
++	status.ImpactScore = impactScore
++	status.LatestNews = latestNews
++	if impactScore >= 0.8 {
++		status.SentimentScore = impactScore
+ 	}
+ 
+ 	var validAsset, validDXY []float64
+@@ -553,6 +1119,11 @@ func calculateAssetStatus(symbol string, dxyMap map[string]float64, endTime time
+ 		}
+ 	}
+ 
++	sigmaLimit, _, _ := globalConfig.GetThresholds()
++	if sigmaLimit == 0 {
++		sigmaLimit = 3.0
++	}
++
+ 	if len(returns) >= 30 {
+ 		recentReturns := returns[len(returns)-30:]
+ 		sum := 0.0
+@@ -572,9 +1143,19 @@ func calculateAssetStatus(symbol string, dxyMap map[string]float64, endTime time
+ 			latestReturn := returns[len(returns)-1]
+ 			if status.Sigma > 0 {
+ 				zScore := (latestReturn - status.Mean) / status.Sigma
+-				if math.Abs(zScore) > 3.0 && !isSilentPeriod() {
++				// ImpactScore > 0.8 lowers the threshold for critical alerts
++				effectiveLimit := sigmaLimit
++				if status.ImpactScore >= 0.8 {
++					effectiveLimit = sigmaLimit * 0.85 // 15% lower threshold when high impact news
++					log.Printf("[%s] High impact news detected (%.2f), lowering sigma threshold to %.2f",
++						asset.Symbol, status.ImpactScore, effectiveLimit)
++				}
++				if math.Abs(zScore) > effectiveLimit && !isSilentPeriod() {
+ 					status.IsCritical = true
+-					status.AlertMessage = fmt.Sprintf("3-Sigma异动! z=%.2f", zScore)
++					status.AlertMessage = fmt.Sprintf("%.1f-Sigma异动! z=%.2f", effectiveLimit, zScore)
++					if status.ImpactScore >= 0.8 {
++						status.AlertMessage += fmt.Sprintf(" (新闻加权: %.1f)", status.ImpactScore)
++					}
+ 				}
+ 			}
+ 		}
+@@ -619,8 +1200,21 @@ func calculateCorrAcceleration(assets []AssetStatus) map[string]float64 {
+ }
+ 
+ func calculateResonance(assets []AssetStatus) ResonanceStatus {
+-	gridHardAssets := []string{"002028.SZ", "002270.SZ"}
+-	aidcAssets := []string{"688676.SS"}
++	// Get Grid-Hard and AIDC assets from config
++	gridHardAssets := []string{}
++	aidcAssets := []string{}
++
++	_, chinaAssets, _ := globalConfig.GetAssets()
++	for _, asset := range chinaAssets {
++		for _, tag := range asset.Tags {
++			if tag == "Grid-Hard" {
++				gridHardAssets = append(gridHardAssets, asset.Symbol)
++			}
++			if tag == "AIDC-Leader" {
++				aidcAssets = append(aidcAssets, asset.Symbol)
++			}
++		}
++	}
+ 
+ 	var gridAssets, aidcAssetsStatus []AssetStatus
+ 	for _, a := range assets {
+@@ -680,10 +1274,10 @@ func calculateResonance(assets []AssetStatus) ResonanceStatus {
+ 
+ 		triggered := []string{}
+ 		if gridTriggered > 0 {
+-			triggered = append(triggered, "Grid-Hard(思源/华明)")
++			triggered = append(triggered, "Grid-Hard")
+ 		}
+ 		if aidcTriggered > 0 {
+-			triggered = append(triggered, "AIDC-Leader(金盘科技)")
++			triggered = append(triggered, "AIDC-Leader")
+ 		}
+ 		resonance.TriggeredAssets = strings.Join(triggered, " + ")
+ 	}
+@@ -693,7 +1287,10 @@ func calculateResonance(assets []AssetStatus) ResonanceStatus {
+ 
+ func isSilentPeriod() bool {
+ 	now := time.Now()
+-	loc, _ := time.LoadLocation("Asia/Shanghai")
++	loc, _ := time.LoadLocation(globalConfig.Runtime.Timezone)
++	if loc == nil {
++		loc, _ = time.LoadLocation("Asia/Shanghai")
++	}
+ 	beijingNow := now.In(loc)
+ 
+ 	weekday := beijingNow.Weekday()
+@@ -701,15 +1298,109 @@ func isSilentPeriod() bool {
+ 		return true
+ 	}
+ 
++	// Market closed hours (15:00 - next day 09:00)
++	hour := beijingNow.Hour()
++	if hour >= 15 || hour < 9 {
++		return true
++	}
++
++	return false
++}
++
++func isAuctionTime() bool {
++	now := time.Now()
++	loc, _ := time.LoadLocation(globalConfig.Runtime.Timezone)
++	if loc == nil {
++		loc, _ = time.LoadLocation("Asia/Shanghai")
++	}
++	beijingNow := now.In(loc)
++
+ 	hour := beijingNow.Hour()
+ 	minute := beijingNow.Minute()
+ 
+-	if hour == 9 && minute < 30 {
++	// Pre-market auction: 09:15 - 09:25
++	if hour == 9 && minute >= 15 && minute <= 25 {
+ 		return true
+ 	}
+ 	return false
+ }
+ 
++func isAuctionSnapshotTime() bool {
++	now := time.Now()
++	loc, _ := time.LoadLocation(globalConfig.Runtime.Timezone)
++	if loc == nil {
++		loc, _ = time.LoadLocation("Asia/Shanghai")
++	}
++	beijingNow := now.In(loc)
++
++	hour := beijingNow.Hour()
++	minute := beijingNow.Minute()
++
++	// Snapshot at exactly 09:25
++	if hour == 9 && minute == 25 {
++		return true
++	}
++	return false
++}
++
++func getAverageVolume(symbol string, days int) (float64, error) {
++	if db == nil {
++		return 0, fmt.Errorf("database not initialized")
++	}
++
++	since := time.Now().AddDate(0, 0, -days).Format("2006-01-02")
++
++	var avgVolume float64
++	err := db.QueryRow(`
++		SELECT AVG(volume) FROM market_data 
++		WHERE symbol LIKE ? AND timestamp > ?
++	`, symbol+"%", since).Scan(&avgVolume)
++
++	if err != nil {
++		return 0, err
++	}
++
++	return avgVolume, nil
++}
++
++func checkAuctionVolumeAlert(asset AssetConfig) (bool, float64, float64) {
++	currentVolume, _ := getLatestVolumeAndTurnover(asset.Symbol)
++	if currentVolume == 0 {
++		return false, 0, 0
++	}
++
++	avgVolume, err := getAverageVolume(asset.Symbol, 5)
++	if err != nil || avgVolume == 0 {
++		return false, currentVolume, 0
++	}
++
++	multiplier := globalConfig.Thresholds.AuctionVolumeMultiplier
++	if multiplier == 0 {
++		multiplier = 2.0
++	}
++
++	isAnomaly := currentVolume > avgVolume*multiplier
++	return isAnomaly, currentVolume, currentVolume / avgVolume
++}
++
++func triggerCapitalAlert(asset AssetConfig, volume float64, ratio float64) {
++	message := fmt.Sprintf("🔥 换血资金进场! %s 集合竞价成交量 %.0f (%.1fx 5日均值)",
++		asset.Symbol, volume, ratio)
++
++	log.Println("[ALERT] " + message)
++
++	// Update global status
++	globalStatus.SilentPeriod = false
++
++	// Send email if configured
++	if smtpUser != "" && smtpPass != "" {
++		subject := "[特级告警] IronCore 检测到换血资金进场"
++		body := fmt.Sprintf("--- IronCore 特级告警 ---\n\n%s\n\n时间: %s\n",
++			message, time.Now().Format("2006-01-02 15:04:05"))
++		sendEmail(subject, body)
++	}
++}
++
+ func checkAndSendAlert(vixWarning bool, assets []AssetStatus) {
+ 	if isSilentPeriod() {
+ 		log.Println("🔇 静默期，跳过报警")
+@@ -771,6 +1462,21 @@ func handleTriggerAudit(w http.ResponseWriter, r *http.Request) {
+ 	w.Write([]byte(`{"status":"triggered"}`))
+ }
+ 
++func handleReloadConfig(w http.ResponseWriter, r *http.Request) {
++	if err := globalConfig.ReloadConfig(); err != nil {
++		w.WriteHeader(http.StatusInternalServerError)
++		json.NewEncoder(w).Encode(map[string]string{
++			"status": "error",
++			"error":  err.Error(),
++		})
++		return
++	}
++	json.NewEncoder(w).Encode(map[string]string{
++		"status":  "success",
++		"message": "Configuration reloaded",
++	})
++}
++
+ func handleLogin(w http.ResponseWriter, r *http.Request) {
+ 	tmpl, err := template.New("login").Parse(loginHTML)
+ 	if err != nil {
+diff --git a/sentinel/ironcore/plotter.py b/sentinel/ironcore/plotter.py
+index 066beed..058bbcd 100644
+--- a/sentinel/ironcore/plotter.py
++++ b/sentinel/ironcore/plotter.py
+@@ -1,7 +1,48 @@
+ import sys
+ import json
+ import matplotlib.pyplot as plt
++import matplotlib.patches as mpatches
+ import numpy as np
++from datetime import datetime
++
++def annotate_news_events(ax, data, names, x_positions):
++    """Annotate high impact news events on the chart"""
++    if 'news_events' not in data:
++        return
++    
++    news_events = data.get('news_events', [])
++    high_impact_events = [e for e in news_events if e.get('impact_score', 0) >= 0.8]
++    
++    if not high_impact_events:
++        return
++    
++    # Add event markers on the chart
++    for i, name in enumerate(names):
++        for event in high_impact_events:
++            # Check if event is related to this asset
++            related_symbols = event.get('related_symbols', [])
++            if name in related_symbols or not related_symbols:
++                # Plot a red dot marker
++                ax.plot(x_positions[i], 0.85, 'ro', markersize=12, 
++                       markeredgecolor='darkred', markeredgewidth=2, 
++                       label='High Impact News' if i == 0 else "")
++                
++                # Add tooltip-like annotation
++                title = event.get('title', 'Unknown')[:30] + '...'
++                ax.annotate(f"📰 {title}", 
++                           xy=(x_positions[i], 0.85),
++                           xytext=(10, 10), textcoords='offset points',
++                           fontsize=7, color='red',
++                           bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
++
++def get_risk_light_color(risk_level):
++    """Get color for geopolitical risk indicator"""
++    colors = {
++        'Green': '#28a745',
++        'Yellow': '#ffc107', 
++        'Red': '#dc3545'
++    }
++    return colors.get(risk_level, '#6c757d')
+ 
+ def main():
+     try:
+@@ -22,11 +63,12 @@ def main():
+                 values30.append(0)
+         
+         vix_dxy_corr = data.get('vix_dxy_corr', 0)
++        risk_level = data.get('geopolitical_risk', 'Green')
+         
+         x = np.arange(len(names))
+         width = 0.35
+         
+-        fig, ax = plt.subplots(figsize=(12, 7))
++        fig, ax = plt.subplots(figsize=(14, 8))
+         
+         ax.bar(x - width/2, values6m, width, label='6mo Baseline', color='#87CEEB')
+         
+@@ -40,13 +82,16 @@ def main():
+         
+         ax.bar(x + width/2, values30, width, label='30d Current', color=colors30)
+         
++        # Annotate high impact news events
++        annotate_news_events(ax, data, names, x)
++        
+         ax.axhline(y=-0.7, color='red', linestyle='--', linewidth=1.5)
+         
+         ax.set_ylabel('Correlation')
+-        ax.set_title('IronCore: Asset Correlation Trend Audit')
++        ax.set_title('IronCore 2.0: Asset Correlation Trend Audit with Geopolitical Overlay')
+         ax.set_xticks(x)
+-        ax.set_xticklabels(names)
+-        ax.legend()
++        ax.set_xticklabels(names, rotation=45, ha='right')
++        ax.legend(loc='upper right')
+         ax.set_ylim(-1, 1)
+         ax.grid(axis='y', linestyle='--', alpha=0.7)
+         
+@@ -65,6 +110,7 @@ def main():
+                            textcoords='offset points',
+                            ha='center', va='top' if v < 0 else 'bottom', fontsize=8)
+         
++        # VIX-DXY correlation box
+         vix_color = 'red' if vix_dxy_corr > 0.5 else 'green'
+         props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+         ax.text(0.02, 0.98, f'VIX-DXY Corr: {vix_dxy_corr:.3f}', 
+@@ -76,10 +122,28 @@ def main():
+                     transform=ax.transAxes, fontsize=9, verticalalignment='top',
+                     color='red', fontweight='bold')
+         
++        # Geopolitical Risk Light
++        risk_color = get_risk_light_color(risk_level)
++        risk_text = f"🌍 Geopolitical Risk: {risk_level}"
++        ax.text(0.98, 0.98, risk_text, 
++                transform=ax.transAxes, fontsize=11, verticalalignment='top',
++                horizontalalignment='right',
++                bbox=dict(boxstyle='round,pad=0.5', facecolor=risk_color, alpha=0.9, edgecolor='black', linewidth=2),
++                color='white' if risk_level == 'Red' else 'black',
++                fontweight='bold')
++        
++        # Add legend for news events
++        if data.get('news_events'):
++            red_dot = mpatches.Patch(color='red', label='⚠️ High Impact News (Score≥0.8)')
++            ax.legend(handles=[red_dot], loc='lower left', fontsize=8)
++        
+         plt.tight_layout()
+-        plt.savefig("audit_chart.png")
++        plt.savefig("audit_chart.png", dpi=150, bbox_inches='tight')
++        print("Chart saved: audit_chart.png", file=sys.stderr)
+     except Exception as e:
+         print(f"Plotting error: {e}", file=sys.stderr)
++        import traceback
++        traceback.print_exc(file=sys.stderr)
+ 
+ if __name__ == "__main__":
+     main()
+\ No newline at end of file
