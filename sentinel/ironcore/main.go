@@ -696,6 +696,11 @@ func isSilentPeriod() bool {
 	loc, _ := time.LoadLocation("Asia/Shanghai")
 	beijingNow := now.In(loc)
 
+	weekday := beijingNow.Weekday()
+	if weekday == time.Saturday || weekday == time.Sunday {
+		return true
+	}
+
 	hour := beijingNow.Hour()
 	minute := beijingNow.Minute()
 

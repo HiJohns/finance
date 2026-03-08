@@ -116,7 +116,24 @@ def save_to_db(conn, data_list):
     conn.commit()
     logger.info(f"Saved {len(data_list)} records to DB")
 
+def is_market_closed():
+    from datetime import datetime
+    import pytz
+    
+    tz = pytz.timezone('Asia/Shanghai')
+    now = datetime.now(tz)
+    
+    weekday = now.weekday()
+    if weekday >= 5:
+        return True
+    
+    return False
+
 def run_collection():
+    if is_market_closed():
+        logger.info("Market is closed on weekend, skipping collection")
+        return []
+    
     logger.info("Starting data collection...")
     
     conn = init_db()
