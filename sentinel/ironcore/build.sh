@@ -31,6 +31,7 @@ if [ "$1" == "release" ]; then
     GOOS=linux GOARCH=amd64 go build -ldflags "${LD_FLAGS}" -o ${BINARY_NAME}
 
     echo "[2/3] 正在上传至服务器 $REMOTE_HOST..."
+    ssh -i "$HOME/zeroSecond/aws/opencode.pem" ${REMOTE_USER}@${REMOTE_HOST} "mkdir -p ${REMOTE_PATH}"
     scp -i "$HOME/zeroSecond/aws/opencode.pem" ./${BINARY_NAME} ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}
     scp -i "$HOME/zeroSecond/aws/opencode.pem" ./${PLOTTER_NAME} ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}
     scp -i "$HOME/zeroSecond/aws/opencode.pem" ./${COLLECTOR_NAME} ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}
